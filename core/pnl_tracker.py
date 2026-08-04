@@ -307,3 +307,29 @@ def get_pnl_summary_for_logging(client) -> Dict:
         "pnl_discrepancy_pct": data["discrepancy_pct"],
         "real_pnl_trade_count": len(data["realized_breakdown"]),
     }
+
+# Compatibility aliases for unified repo scripts (v2.6.0+)
+def reconcile_optionable_vs_alpaca(client, optionable_url=None):
+    try:
+        summary = get_pnl_summary_for_logging(client)
+        return {
+            'alpaca': {
+                'realized_matched': summary.get('realized', 0),
+                'unrealized': summary.get('unrealized', 0),
+            },
+            'optionable': summary.get('optionable', {}),
+            'discrepancy': {'inflated_vs_real': summary.get('discrepancy', 0)},
+            'summary': summary,
+        }
+    except Exception as e:
+        return {'error': str(e), 'realized': 0}
+
+def get_real_pnl_from_orders(client):
+    return get_real_pnl(client)
+
+def get_unrealized_pnl(client):
+    try:
+        return _compute_unrealized(client)
+    except:
+        return {'unrealized': 0}
+

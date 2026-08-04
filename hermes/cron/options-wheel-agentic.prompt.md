@@ -1,4 +1,12 @@
-# Options Wheel Agentic — Cron Prompt v2.4+v2.5.3 Hybrid
+# Options Wheel Agentic — Cron Prompt v2.6.0 Unified
+
+> CANONICAL LOCATION: ~/wheel-stack (private GitHub smitpatel316/wheel-stack)
+> Legacy fallback ~/options-wheel kept readonly
+> Schedule 5 7,10,12 * * 1-5 ET 10:05/13:05/15:35 Mon-Fri, Paper $100k Pi budupi
+
+> CANONICAL PATH: ~/wheel-stack is source of truth (private GitHub smitpatel316/wheel-stack). Legacy ~/options-wheel kept readonly fallback. Always cd ~/wheel-stack first.
+
+
 
 > Extracted from Hermes cron job 014708b33a6a — schedule `5 7,10,12 * * 1-5` (ET 10:05/13:05/15:35) Mon-Fri
 > Paper $100k on Pi budupi, MCP Everywhere, Model-First hybrid LLM+Bayes arXiv:2512.01123 + Sophie quant
@@ -91,7 +99,7 @@ Tools: MCP 62 alpaca-mcp + 131 alphavantage (EARNINGS_CALENDAR DIVIDENDS COMPANY
 
 ### Phase 0.1 Earnings (Finnhub v2.4 503 proof)
 ```bash
-cd ~/wheel-stack || cd ~/options-wheel
+cd ~/wheel-stack || cd ~/wheel-stack || cd ~/options-wheel
 FINNHUB_API_KEY=***REMOVED***3g***REMOVED***40 python -c "from core.earnings_calendar import get_earnings_risk_report; print(get_earnings_risk_report(['AAPL','CSCO','INTC','AMD','BAC','WFC','F','T','VZ','SBUX','KO','PG','PFE','JNJ','XOM','CVX','HON','CAT','NEE','DUK','LIN','MP','DLR','PLD','SPY'], block_days=3, days_ahead=30, dte_default=21))"
 ```
 
@@ -112,7 +120,7 @@ python -c "from core.volatility import get_volatility_report; print(get_volatili
 
 ### Phase 1 Context Analyzer Yahoo v8 VIX real
 ```bash
-cd ~/wheel-stack || cd ~/options-wheel
+cd ~/wheel-stack || cd ~/wheel-stack || cd ~/options-wheel
 FINNHUB_API_KEY=... ALPHA_VANTAGE_API_KEY=***REMOVED*** python -c "
 from core.context_analyzer import analyze_context, adapt_params
 from config.credentials import *
@@ -253,7 +261,7 @@ Phase 0.4 Volatility IV Rank proxy (Alpha TIME_SERIES_DAILY):
 python -c "from core.volatility import get_volatility_report; print(get_volatility_report([...], vix=15.6))"
 
 Phase 1 Context Analyzer Yahoo v8 VIX real:
-cd ~/options-wheel && FINNHUB_API_KEY=... ALPHA_VANTAGE_API_KEY=***REMOVED*** python -c "from core.context_analyzer import analyze_context, adapt_params; from config.credentials import *; from core.broker_client import BrokerClient; cli=BrokerClient(ALPACA_API_KEY,ALPACA_SECRET_KEY,IS_PAPER); ctx=analyze_context(cli, None, False); print(ctx.to_dict()); print(adapt_params(ctx))" -> market_context.json
+cd ~/wheel-stack || cd ~/wheel-stack || cd ~/options-wheel && FINNHUB_API_KEY=... ALPHA_VANTAGE_API_KEY=***REMOVED*** python -c "from core.context_analyzer import analyze_context, adapt_params; from config.credentials import *; from core.broker_client import BrokerClient; cli=BrokerClient(ALPACA_API_KEY,ALPACA_SECRET_KEY,IS_PAPER); ctx=analyze_context(cli, None, False); print(ctx.to_dict()); print(adapt_params(ctx))" -> market_context.json
 
 Phase 2 Closer 50% Option A:
 python -c "from core.closer import evaluate_all_for_close; ..."
