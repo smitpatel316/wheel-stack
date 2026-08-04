@@ -8,7 +8,7 @@ Paper $100k PA3WFOAHE2C6, hybrid v2.5.3/v2.5.4 production, model-first: Earnings
 
 Before: 3 repos / locations fragmented:
 - `~/options-wheel` core logic, but .env keys scattered, logs in logs/, params.py v2.4
-- `/home/smitpatel316/optionable-data` docker-compose + DB 15 trades but P/L bug closePrice=0 => $568 phantom vs $52 real
+- `/home/smitpatel316/optionable-data` docker-compose + DB 15 trades
 - `~/.hermes/skills/pi/options-wheel-trading` 53k SKILL.md + 30 references, cron prompt 20k chars in ~/.hermes/cron/jobs.json, MCP config in gateway
 
 Now: One repo `~/wheel-stack` with all three working hand-in-hand, so changes propagate.
@@ -34,11 +34,11 @@ wheel-stack/
 │   ├── fundamentals.py    # Alpha COMPANY_OVERVIEW P/E Debt/Eq div yield mkt cap beta, blocks P/E>50 AMD 158, boost div>1.5%
 │   ├── volatility.py      # Alpha TIME_SERIES_DAILY RV 20d annualized, RV rank IV proxy high>=50 bonus 1.1 low<20 penalty 0.9 adaptive delta
 │   ├── liquidity.py       # Spread filter + volume OI trend
-│   ├── optionable_sync.py # FIXED v2.6 real closePrice from Alpaca fills, not 0 - fixes $568 bug, plus sync_realized_pnl_from_alpaca()
-│   ├── pnl_tracker.py     # NEW v2.6 true P/L reconciliation Alpaca fills vs Optionable inflated
+│   ├── optionable_sync.py # Optionable ↔ wheel bridge — fetches real closePrice from Alpaca fills, syncs trades
+│   ├── pnl_tracker.py     # True P/L reconciliation Alpaca fills vs Optionable
 │   └── broker_client.py   # MarketBuy/Sell via Alpaca-py, IEX feed for free tier SIP 403
 ├── app_logging/
-│   └── strategy_logger.py # 27→30 factors: wheel_trades.jsonl, market_context 500 ring, roll/close decisions, real vs optionable PnL
+│   └── strategy_logger.py # 30 factors: wheel_trades.jsonl, market_context 500 ring, roll/close decisions, real PnL
 ├── scripts/
 │   ├── run_strategy.py    # CLI main hybrid phases 0.1-6 with IEX context
 │   └── agentic_runner.py  # NEW hermes wrapper using MCP where possible
@@ -61,7 +61,7 @@ wheel-stack/
 │   └── cloudflared-config-snippet.yml # wheel.smitpatel.net -> 8096, webhook -> 8644
 ├── docs/
 │   ├── architecture.md    # full system diagram + data flow
-│   ├── pnl-fix.md         # $568 vs $52 root cause + fix
+│   ├── pnl-fix.md         # P/L reconciliation details
 │   ├── improvements-roadmap.md # v2.5.3, v2.5.4, upcoming
 │   └── deployment.md      # pi steps
 ├── docker-compose.yml     # root unified compose (optionable + optional api)
@@ -70,21 +70,6 @@ wheel-stack/
 ├── pyproject.toml
 └── README.md
 ```
-
-## Critical Bug Fixed: $568 vs $52
-
-**Symptom:** Optionable dashboard 2026-08-04 showed OPTIONS P/L $568 (3 closed: BAC $66 + CVX $312 + INTC $190). Real Alpaca fills: BAC sold 0.66 bought 0.69 = -$3, CVX 3.10->3.35 = -$25, INTC 1.90->1.10 = +$80 = **+$52 realized**.
-
-**Root cause:** `core/optionable_sync.py:sync_closed_trades()` set `closePrice=0` when marking Closed. Optionable P/L = entryPrice*100 when closePrice=0 (assumes expired worthless). For buy-to-close rolls/profit-takes, closePrice must be actual buy fill price. Profit = (entry - close)*100*qty.
-
-**Fix v2.6:** 
-- `_fetch_buy_price_from_alpaca(client, occ)` queries Alpaca closed BUY orders for OCC, returns real fill price
-- `sync_closed_trades()` now fetches close_price from map, writes `closePrice: float(close_price)` via PUT /api/trades/{id}
-- `push_close_to_optionable()` new helper for explicit close with price
-- `sync_realized_pnl_from_alpaca()` reconciles: computes Alpaca sells-boys, compares to Optionable reported, returns discrepancy
-- New `core/pnl_tracker.py` true P/L tracker
-
-See `docs/pnl-fix.md` for full details.
 
 ## Hermes Agentic Setup (MCP Everywhere)
 
