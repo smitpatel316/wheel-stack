@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "alpaca": {
+      "command": "uvx",
+      "args": ["alpaca-mcp-server"],
+      "env": {
+        "ALPACA_API_KEY": "${ALPACA_API_KEY}",
+        "ALPACA_SECRET_KEY": "${ALPACA_SECRET_KEY}",
+        "ALPACA_PAPER": "${IS_PAPER:-true}"
+      },
+      "description": "Alpaca Trading MCP 62 tools via FastMCP 3.4.5 from OpenAPI 203KB 40 paths — Trading API paper $100k, replaces custom broker_client raw REST where possible",
+      "timeout": 30000,
+      "enabled": true
+    }
+  }
+}

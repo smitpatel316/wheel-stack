@@ -1,0 +1,72 @@
+# Wheel Stack - Unified Options Wheel Trading System
+# Production: Pi budupi, Docker + Hermes agentic cron + Optionable tracker
+# v2.6.0 unified repo
+
+version: "3.8"  # kept for compatibility, but compose v2 ignores
+
+services:
+  optionable:
+    container_name: optionable
+    image: yomikoye/optionable:latest
+    ports:
+      - "8096:8080"
+    environment:
+      - TZ=America/Los_Angeles
+      - NODE_ENV=production
+      - DATA_DIR=/data
+    volumes:
+      - /home/smitpatel316/optionable-data:/data
+      - ./optionable/data:/data_backup:ro
+    restart: unless-stopped
+    networks:
+      - wheel-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.wheel-stack.service=optionable"
+      - "com.wheel-stack.version=v2.6.0"
+
+  # Optional: Wheel API - lightweight Python service exposing strategy status
+  # Runs core/ scripts via FastAPI for dashboard, not required for cron (cron uses Hermes)
+  wheel-api:
+    container_name: wheel-api
+    build:
+      context: .
+      dockerfile: Dockerfile.wheel-api
+    image: wheel-stack/api:latest
+    ports:
+      - "8097:8097"
+    environment:
+      - TZ=America/Los_Angeles
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - IS_PAPER=${IS_PAPER:-true}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
+      - OPTIONABLE_URL=http://optionable:8080
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    depends_on:
+      optionable:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - wheel-net
+    profiles:
+      - api  # only start with --profile api, optional
+    labels:
+      - "com.wheel-stack.service=wheel-api"
+
+networks:
+  wheel-net:
+    name: wheel-network
+    driver: bridge
+
+# Volumes for optional backup (not used by default, data lives in host path)
+volumes:
+  optionable-data:
+    driver: local

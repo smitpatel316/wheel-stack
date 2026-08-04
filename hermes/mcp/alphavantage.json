@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "alphavantage": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "env": {},
+      "url": "https://mcp.alphavantage.co/mcp?apikey=${ALPHA_VANTAGE_API_KEY}",
+      "transport": "sse",
+      "description": "Alpha Vantage MCP 131 tools: TIME_SERIES_DAILY, COMPANY_OVERVIEW, EARNINGS_CALENDAR, DIVIDENDS, REALTIME_OPTIONS, etc used for Model-First context analyzer v2.4",
+      "timeout": 30000,
+      "enabled": true,
+      "alternative": {
+        "command": "uvx",
+        "args": ["alphavantage-mcp-server"],
+        "env": {
+          "ALPHAVANTAGE_API_KEY": "${ALPHA_VANTAGE_API_KEY}"
+        },
+        "note": "If official SSE endpoint unstable, use uvx wrapper. Config in ~/.hermes/mcp.json or gateway config.yaml"
+      }
+    },
+    "alphavantage_fetch": {
+      "command": "npx",
+      "args": ["-y", "alphavantage-mcp"],
+      "env": {
+        "ALPHAVANTAGE_API_KEY": "${ALPHA_VANTAGE_API_KEY}",
+        "API_KEY": "${ALPHA_VANTAGE_API_KEY}"
+      },
+      "description": "Fallback stdio wrapper for Alpha Vantage if SSE fails",
+      "enabled": false
+    }
+  }
+}

@@ -1,0 +1,68 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Env
+.env
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs - keep structure but ignore large jsonl
+logs/*.jsonl
+logs/*.log
+logs/strategy_log.json
+logs/market_context.json
+logs/cron.log
+logs/wheel_trades.jsonl
+logs/earnings_cache.json
+logs/dividend_cache.json
+logs/volatility_cache.json
+logs/fundamentals_cache.json
+logs/liquidity_cache.json
+logs/*.tmp
+
+# Optionable data - host path, not in repo
+optionable-data/
+optionable/data/
+data/
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (if optionable fork)
+node_modules/
+dist/
+coverage/
+
+# Hermes secrets
+.hermes/.env
+*.key
+*.secret
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+playwright-report/
+test-results/
+blob-report/
