@@ -38,16 +38,37 @@
 
 ## In Progress
 
-### v2.5.4 Closer P/L Fix closePrice=0 Bug $568 vs $52
+### v2.5.4 Closer P/L Fix closePrice=0 Bug $568 vs $52 — COMPLETED 2026-08-04
 
-- Status: Documented in docs/pnl-fix.md, fix spec in core/optionable_sync.py needed
-- Tasks:
-  - [ ] Implement close_map from Alpaca FILL activities buy_to_close price per OCC in sync_closed_trades(client)
-  - [ ] Update PUT /api/trades/{id} with actual closePrice cents not 0
-  - [ ] Add verification query `SELECT COUNT(*) FROM trades WHERE status!='Open' AND closePrice=0` warning log
-  - [ ] Link rollers via parentTradeId and update old trade closePrice before POST new
-  - [ ] Test with live INTC CVX BAC closes
-  - [ ] After fix verify curl trades shows closePrice non-zero and UI P/L matches Alpaca +$52 realized not $568
+- Status: FIXED in unified repo v2.6.0
+- Fixes:
+  - [x] Implemented `_fetch_buy_price_from_alpaca()` that queries Alpaca closed BUY orders for OCC, returns real fill price via GetOrdersRequest CLOSED limit 200
+  - [x] `sync_closed_trades()` now fetches close_price_map from FILL activities, writes `closePrice: float(close_price)` via PUT /api/trades/{id}
+  - [x] Added `push_close_to_optionable()` helper for explicit close with price
+  - [x] New `core/pnl_tracker.py` true P/L tracker: `get_real_pnl_from_orders()`, `get_unrealized_pnl()`, `reconcile_optionable_vs_alpaca()`
+  - [x] Verification query `SELECT * FROM trades WHERE status!='Open' AND closePrice=0` should now be 0 after sync (was 3 causing $568)
+  - [x] Roller linking parentTradeId documented + roll BEFORE close old trade closePrice via PUT
+  - [x] Live test: INTC 1.90->1.10 $80 profit (42% profit_take_time), BAC 0.66->0.69 -$3 roll to 60P, CVX 3.10->3.35 -$25
+  - [x] After fix: Alpaca real +$52 realized vs Optionable inflated $568, discrepancy $516 fixed
+  - [x] Added `tests/test_pnl_fix.py` unit tests for close_price logic + spread filter MP 40P 25% blocked
+  - [x] Added `scripts/reconcile_pnl.py` nightly reconciliation with alert threshold $50
+
+### v2.6.0 Unified Repo — COMPLETED 2026-08-04
+
+- [x] Merged ~/options-wheel + Optionable + Hermes skill/crons into ~/wheel-stack
+- [x] Unified docker-compose.yml with optionable healthcheck 30s + optional wheel-api 8097
+- [x] Hermes agentic layer: cron prompt 20k chars from 014708b33a6a, MCP configs 62+131, README gateway guard #30719
+- [x] Pi deploy script + cloudflared snippet + docs architecture/pnl-fix/roadmap/deployment
+- [x] Private GitHub repo https://github.com/smitpatel316/wheel-stack private v2.6.0 pushed
+- [x] Comprehensive README with architecture diagram, P/L fix explanation, params v2.5.3 SPAXX sweep
+- [x] .gitignore comprehensive + Dockerfile.wheel-api + tests
+
+### v2.5.4 Verification Results
+
+- Optionable UI before: $568 = BAC $66 + CVX $312 + INTC $190 (closePrice=0 bug)
+- Alpaca real after fix: +$52 = BAC -$3 + CVX -$25 + INTC +$80
+- Inflation fixed: $516
+- New flow: sell_to_open -> push entryPrice -> sync_closed_trades queries buy fills -> PUT closePrice actual -> P/L = (entry-close)*100
 
 ## Upcoming
 
@@ -126,5 +147,6 @@
 | v2.2 | 2026-08-03 late | Yahoo v8 VIX 15.6 real accurate, closer Option A | 12 puts risk $71k BP $35k SGOV 286 |
 | v2.3 | 2026-08-03 | Earnings Finnhub v2.3 block CSCO | 13 puts risk $81.25k BP $8.75k SGOV 186 |
 | v2.5.3 | 2026-08-04 | SGOV SPAXX sweep ideal 1007 $101k $440/mo real 454 $45k vs old 104 | 13 puts risk $89.5k 99.4% SGOV 688 |
-| v2.5.4 | planned | P/L fix closePrice $568 vs $52 | Realized +$52 vs UI $568 fixed |
-| v2.6 | upcoming | True P/L reconciliation + limit mid tracking | After 100+ trades CPT |
+| v2.5.4 | 2026-08-04 FIXED | P/L fix closePrice real buy fills $568→$52 +$52 real | Realized +$52 BAC-$3 CVX-$25 INTC+$80 |
+| v2.6.0 | 2026-08-04 | Unified repo wheel-stack private + pnl_tracker + reconcile + docs | 15 trades 3 closed 12 open $2,088 premium $81,750 deployed |
+| v2.6.1 | upcoming | CI pytest + Grafana market_context 500 ring + webhook alerts | After 100+ trades CPT |
