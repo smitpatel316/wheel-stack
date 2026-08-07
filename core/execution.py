@@ -55,22 +55,40 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
             logger.info(f"[EXEC] Limit sell {symbol} @ mid ${limit_price:.2f} bid ${bid:.2f} ask ${getattr(contract_obj,'ask_price',0)} mid ${mid:.2f}")
             if wait_seconds > 0 and order:
                 time.sleep(wait_seconds)
-        else:
-            if hasattr(client, 'place_option_order'):
+            # v2.6: verify the fill. The old code returned success on an unfilled
+            # resting order — phantom trades in the tracker, and a stale order
+            # that could fill later at a bad price or duplicate the next run's sell.
+            order_id = getattr(order, 'id', None)
+            if order_id:
                 try:
-                    order = client.place_option_order(symbol, qty=1, side='sell', type='limit', limit_price=limit_price, time_in_force='day', position_intent='sell_to_open')
-                    logger.info(f"[EXEC] Limit order placed {symbol} @ ${limit_price:.2f} mid ${mid:.2f}")
-                    time.sleep(wait_seconds)
-                except Exception as le:
-                    logger.warning(f"Limit order failed {symbol} @ {limit_price}: {le}, fallback market")
-                    client.market_sell(symbol)
-                    return {"type": "market_fallback", "price": bid, "mid": mid, "limit_attempt": limit_price, "improvement": 0.0}
-            else:
-                client.market_sell(symbol)
-                return {"type": "market", "price": bid, "mid": mid, "improvement": 0.0}
-
-        improvement = limit_price - bid if bid else 0
-        return {"type": "limit", "price": limit_price, "mid": mid, "bid": bid, "improvement": improvement}
+                    o = client.get_order(order_id)
+                    status = str(getattr(o, 'status', '')).lower()
+                    if 'filled' in status:
+                        fill_px = float(getattr(o, 'filled_avg_price', 0) or limit_price)
+                        improvement = fill_px - bid if bid else 0
+                        logger.info(f"[EXEC] Limit FILLED {symbol} @ ${fill_px:.2f} (+${improvement:.2f} vs bid)")
+                        return {"type": "limit", "price": fill_px, "mid": mid, "bid": bid, "improvement": improvement}
+                    logger.info(f"[EXEC] Limit {symbol} unfilled after {wait_seconds}s (status {status}) - cancel + market fallback")
+                    try:
+                        client.cancel_order(order_id)
+                    except Exception as ce:
+                        # Race: filled between the check and the cancel
+                        o2 = client.get_order(order_id)
+                        if 'filled' in str(getattr(o2, 'status', '')).lower():
+                            fill_px = float(getattr(o2, 'filled_avg_price', 0) or limit_price)
+                            return {"type": "limit", "price": fill_px, "mid": mid, "bid": bid, "improvement": (fill_px - bid if bid else 0)}
+                        logger.debug(f"cancel failed {symbol}: {ce}")
+                except Exception as fe:
+                    logger.debug(f"fill check failed {symbol}: {fe} - cancel + market to be safe")
+                    try:
+                        client.cancel_order(order_id)
+                    except Exception:
+                        pass
+            client.market_sell(symbol)
+            return {"type": "market_fallback_unfilled", "price": bid, "mid": mid, "limit_attempt": limit_price, "improvement": 0.0}
+        else:
+            client.market_sell(symbol)
+            return {"type": "market", "price": bid, "mid": mid, "improvement": 0.0}
     except Exception as e:
         logger.warning(f"Limit sell failed for {symbol} mid ${mid}: {e}, market fallback")
         try:
@@ -168,9 +186,10 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
 
 def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, market_context=None, dividend_map=None, execution_config=None):
     if stock_qty < 100:
-        msg = f"Not enough shares of {symbol} to cover short calls! Only {stock_qty} shares are held and at least 100 are needed!"
-        logger.error(msg)
-        raise ValueError(msg)
+        # Log and skip instead of raising: an unhandled raise here killed the
+        # whole run (SGOV sweep + Optionable sync never happened).
+        logger.warning(f"Skipping covered calls on {symbol}: only {stock_qty} shares held, need 100+ for one contract")
+        return
     execution_config = execution_config or {}
     enable_limit = execution_config.get("limit_enabled", True)
     wait_seconds = execution_config.get("wait_seconds", 8)
@@ -234,50 +253,16 @@ def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, mar
         logger.info(f"No viable call options found for {symbol}")
 
 def place_sgov_limit_order(client, side: str, qty: int, logger_obj=None):
-    """v2.5.1 SGOV limit at mid-price to shave 1c slippage"""
+    """SGOV orders. Per Smit 2026-08-05: plain market orders — SGOV is liquid
+    enough that the 1c limit-order dance isn't worth the unfilled risk."""
     log = logger_obj or logger
     try:
-        latest_trade = client.get_stock_latest_trade("SGOV")
-        trade = latest_trade.get("SGOV") if isinstance(latest_trade, dict) else None
-        price = None
-        if trade:
-            price = getattr(trade, 'price', None) or (trade.get('price') if isinstance(trade, dict) else None)
-        if not price:
-            price = 100.0
-        price = float(price)
-        # 2c improvement for SGOV very liquid
-        if side.lower() == "buy":
-            limit_price = round(price - 0.01, 2)  # buy slightly below last
-        else:
-            limit_price = round(price + 0.01, 2)
-        # Use limit if available
-        if hasattr(client, 'limit_buy') and side.lower() == "buy":
-            try:
-                client.limit_buy("SGOV", qty, limit_price)
-                log.info(f"[SGOV] Limit {side} {qty} @ ${limit_price:.2f} last ${price:.2f}")
-                return True
-            except Exception as e:
-                log.debug(f"SGOV limit buy fallback: {e}")
-        if hasattr(client, 'limit_sell') and side.lower() == "sell":
-            try:
-                client.limit_sell("SGOV", qty, limit_price)
-                log.info(f"[SGOV] Limit {side} {qty} @ ${limit_price:.2f} last ${price:.2f}")
-                return True
-            except Exception as e:
-                log.debug(f"SGOV limit sell fallback: {e}")
-        # Fallback to market
         if side.lower() == "buy":
             client.market_buy("SGOV", qty)
         else:
             client.market_sell_qty("SGOV", qty)
+        log.info(f"[SGOV] Market {side} {qty}")
         return True
     except Exception as e:
         log.warning(f"SGOV {side} {qty} failed: {e}")
-        try:
-            if side.lower() == "buy":
-                client.market_buy("SGOV", qty)
-            else:
-                client.market_sell_qty("SGOV", qty)
-            return True
-        except Exception:
-            return False
+        return False

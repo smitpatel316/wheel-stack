@@ -107,6 +107,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 "Sector": data.get("Sector"),
                 "AnalystTargetPrice": data.get("AnalystTargetPrice"),
                 "ExDividendDate": data.get("ExDividendDate"),
+                "QuarterlyEarningsGrowthYOY": data.get("QuarterlyEarningsGrowthYOY"),
+                "QuarterlyRevenueGrowthYOY": data.get("QuarterlyRevenueGrowthYOY"),
                 "DebtEquity": None,
             }
         time.sleep(0.6)
@@ -189,6 +191,31 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
         if beta > 2.0:
             score_mod *= 0.9
             reasons.append(f"High Beta {beta:.1f}")
+    except Exception:
+        pass
+
+    # Growth screen v2.6: both revenue and earnings shrinking YoY -> block.
+    # One shrinking -> small penalty. Missing data -> no opinion (never block).
+    try:
+        from config.params import GROWTH_BLOCK_ENABLED
+    except Exception:
+        GROWTH_BLOCK_ENABLED = True
+    try:
+        eg_raw = f.get("QuarterlyEarningsGrowthYOY")
+        rg_raw = f.get("QuarterlyRevenueGrowthYOY")
+        eg = float(eg_raw) if eg_raw not in (None, "", "None") else None
+        rg = float(rg_raw) if rg_raw not in (None, "", "None") else None
+        if eg is not None and rg is not None:
+            if eg < 0 and rg < 0:
+                if GROWTH_BLOCK_ENABLED:
+                    blocked = True
+                    reasons.append(f"Growth block: revenue {rg:+.0%} and EPS {eg:+.0%} both shrinking YoY - deteriorating name")
+                else:
+                    score_mod *= 0.9
+                    reasons.append(f"Growth: revenue {rg:+.0%} and EPS {eg:+.0%} shrinking YoY")
+            elif eg < 0 or rg < 0:
+                score_mod *= 0.95
+                reasons.append(f"Growth mixed: revenue {rg:+.0%}, EPS {eg:+.0%}")
     except Exception:
         pass
 

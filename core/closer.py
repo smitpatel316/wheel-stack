@@ -230,11 +230,12 @@ def close_position(client, candidate: RollCandidate, logger_obj=None) -> bool:
         fees = comm_per * qty_abs * 2
         net = gross - fees
         # Real P/L = sell premium - buyback cost - fees
+        otm_pct = (candidate.underlying_price - candidate.strike)/candidate.strike if candidate.is_put and candidate.strike else 0
         log.info(
             f"[CLOSER] Closing {candidate.symbol} profit {candidate.profit_pct:.0%} "
             f"gross ${gross:.2f} net ${net:.2f} fees ${fees:.2f} "
             f"entry ${candidate.avg_entry_price:.2f} cur ${candidate.current_price:.2f} "
-            f"DTE {candidate.dte} qty {qty_abs} delta {candidate.delta} OTM {(candidate.underlying_price-candidate.strike)/candidate.strike:.1% if candidate.is_put and candidate.strike else 0:.1%}"
+            f"DTE {candidate.dte} qty {qty_abs} delta {candidate.delta} OTM {otm_pct:.1%}"
         )
 
         req = MarketOrderRequest(

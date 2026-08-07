@@ -74,6 +74,10 @@ DIV_YIELD_MIN = 0.0  # was 1.5% Sophie, relaxed - we hold SGOV for yield
 MARKET_CAP_MIN = 1_000_000_000  # $1B min
 FUNDAMENTALS_CACHE_TTL = 24*3600  # 24h, fundamentals slow-changing
 
+# Growth screen v2.6 - block names where BOTH revenue and earnings are shrinking YoY.
+# Deteriorating names are assignment traps: they drift down, get you assigned, stay assigned.
+GROWTH_BLOCK_ENABLED = True
+
 # IV Rank / Volatility v2.4 + v2.5 AD adaptive
 IV_RANK_ENABLED = True
 IV_RANK_LOW = 20  # below = low IV, wait or wider OTM

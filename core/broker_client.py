@@ -47,6 +47,18 @@ class BrokerClient:
         req = MOR(symbol=symbol, qty=qty, side=OrderSide.SELL, type='market', time_in_force=TimeInForce.DAY)
         return self.trade_client.submit_order(req)
 
+    def limit_sell(self, symbol, limit_price, qty=1):
+        from alpaca.trading.requests import LimitOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        req = LimitOrderRequest(symbol=symbol, qty=qty, side=OrderSide.SELL, limit_price=limit_price, time_in_force=TimeInForce.DAY)
+        return self.trade_client.submit_order(req)
+
+    def get_order(self, order_id):
+        return self.trade_client.get_order_by_id(order_id)
+
+    def cancel_order(self, order_id):
+        return self.trade_client.cancel_order_by_id(order_id)
+
     def get_account(self):
         return self.trade_client.get_account()
 

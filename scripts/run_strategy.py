@@ -388,7 +388,9 @@ def main():
                 logger.info(f"[CLOSER] {len(should_close)} ready for profit take:")
                 for d in sorted(should_close, key=lambda x: -x.profit_pct)[:5]:
                     logger.info(f"  - {d.candidate.symbol} {d.close_type} profit {d.profit_pct:.0%} (${d.profit_dollars:.0f}) DTE {d.candidate.dte} urgency {d.urgency}: {d.reasons}")
-                for decision in sorted(should_close, key=lambda x: -x.profit_pct)[:3]:
+                if not is_market_open:
+                    logger.info(f"[CLOSER] Market closed - deferring {len(should_close)} profit-take orders to next open session (queued market orders can fill badly at the open)")
+                for decision in (sorted(should_close, key=lambda x: -x.profit_pct)[:3] if is_market_open else []):
                     try:
                         success = close_position(client, decision.candidate, logger_obj=logger)
                         if success and strat_logger.enabled:
@@ -430,11 +432,18 @@ def main():
             })
             strat_logger.log_roll_decisions(roll_decisions)
             need_roll = [d for d in roll_decisions if d.should_roll]
+            # Prioritize: critical (DTE<=1) first, then high/medium, then nearest expiry.
+            # Was evaluation order — in a sell-off the 2-roll-per-run cap could skip the
+            # position that actually gets assigned.
+            urgency_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            need_roll.sort(key=lambda d: (urgency_rank.get(d.urgency, 3), d.candidate.dte if d.candidate.dte is not None else 999))
             if need_roll:
                 logger.info(f"[ROLLER] {len(need_roll)} need rolling:")
                 for d in need_roll:
                     logger.info(f"  - {d.candidate.symbol} {d.roll_type} urgency {d.urgency} OTM {d.decision_factors.get('otm_pct',0):.1%} ITM {d.candidate.itm_pct:.1%} DTE {d.candidate.dte}: {d.reasons}")
-                for decision in need_roll[:2]:
+                if not is_market_open:
+                    logger.info(f"[ROLLER] Market closed - deferring {len(need_roll)} rolls to next open session")
+                for decision in (need_roll[:2] if is_market_open else []):
                     try:
                         underlying = decision.candidate.underlying
                         opt_type = 'put' if decision.candidate.is_put else 'call'
