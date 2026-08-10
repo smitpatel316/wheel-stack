@@ -351,6 +351,44 @@ def main():
         strat_logger.set_buying_power(effective_max_risk - current_risk)
         logger.info(f"[ACCOUNT] Equity ${float(acct.equity):.2f} Cash ${float(acct.cash):.0f} Stock BP ${stock_bp:.0f} Options BP ${opt_bp:.0f} Risk ${current_risk:.0f}/{effective_max_risk}")
 
+        # Record equity snapshot for the Optionable income/benchmark dashboard
+        try:
+            import json as _json
+            from datetime import datetime as _dt
+            eq_path = Path(__file__).resolve().parent.parent / "logs" / "equity_history.json"
+            hist = []
+            if eq_path.exists():
+                try:
+                    hist = _json.loads(eq_path.read_text())
+                except Exception:
+                    hist = []
+            hist.append({"t": _dt.now().astimezone().isoformat(), "equity": float(acct.equity)})
+            eq_path.write_text(_json.dumps(hist[-5000:]))
+
+            # SGOV holding snapshot (accrual-accurate income tracking for the dashboard)
+            try:
+                sgov_qty, sgov_avg = 0.0, None
+                for _p in client.get_positions():
+                    if getattr(_p, "symbol", None) == "SGOV":
+                        sgov_qty = float(getattr(_p, "qty", 0))
+                        try:
+                            sgov_avg = float(getattr(_p, "avg_entry_price"))
+                        except Exception:
+                            sgov_avg = None
+                sg_path = Path(__file__).resolve().parent.parent / "logs" / "sgov_history.json"
+                sh = []
+                if sg_path.exists():
+                    try:
+                        sh = _json.loads(sg_path.read_text())
+                    except Exception:
+                        sh = []
+                sh.append({"t": _dt.now().astimezone().isoformat(), "shares": sgov_qty, "avg": sgov_avg})
+                sg_path.write_text(_json.dumps(sh[-5000:]))
+            except Exception as _e2:
+                logger.warning(f"[ACCOUNT] sgov snapshot failed: {_e2}")
+        except Exception as _e:
+            logger.warning(f"[ACCOUNT] equity snapshot failed: {_e}")
+
         # --- Activities check for assignments (OPASN) v2.5 ---
         try:
             from alpaca.trading.requests import GetAccountActivitiesRequest
