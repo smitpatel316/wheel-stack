@@ -66,6 +66,7 @@ def filter_underlying(client, symbols, buying_power_limit, earnings_map=None, di
                     if liq.get("avg_5d", 0) < 300_000:  # only block if very thin
                         print(f"[LIQ] Skip {sym}: {liq.get('reason')} - extremely thin")
                         continue
+            safe.append(sym)
         filtered_symbols = safe
 
     if vol_map:
