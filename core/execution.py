@@ -5,14 +5,21 @@ from .strategy import filter_underlying, filter_options, score_options, select_o
 from models.contract import Contract
 import numpy as np
 
-try:
-    from .wheeler_sync import push_option_to_wheeler
-    def _push_wheeler(sym, premium, contracts=1):
-        try:
-            push_option_to_wheeler(sym, premium, contracts)
-        except Exception:
+import os as _os
+if _os.getenv("ENABLE_WHEELER_SYNC", "").lower() in ("1", "true", "yes"):
+    try:
+        from .wheeler_sync import push_option_to_wheeler
+        def _push_wheeler(sym, premium, contracts=1):
+            try:
+                push_option_to_wheeler(sym, premium, contracts)
+            except Exception:
+                pass
+    except ImportError:
+        def _push_wheeler(sym, premium, contracts=1):
             pass
-except ImportError:
+else:
+    # Wheeler tracker was replaced by Optionable; its old REST paths 404.
+    # Set ENABLE_WHEELER_SYNC=1 to re-enable.
     def _push_wheeler(sym, premium, contracts=1):
         pass
 
@@ -164,6 +171,9 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             except Exception as e:
                 logger.warning(f"Sell failed for {p.symbol}: {e}")
                 buying_power += need
+                if "buying power" in str(e).lower() or "insufficient" in str(e).lower():
+                    logger.info(f"Stopping new CSPs: Alpaca reports insufficient buying power after {p.symbol} - remaining candidates skipped this run")
+                    break
                 continue
 
             _push_wheeler(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1)
