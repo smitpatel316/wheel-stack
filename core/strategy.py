@@ -10,7 +10,17 @@ def filter_underlying(client, symbols, buying_power_limit, earnings_map=None, di
     """
     from datetime import date
     resp = client.get_stock_latest_trade(symbols)
+    if not resp:
+        print(f"[DATA] get_stock_latest_trade returned EMPTY for {len(symbols)} symbols - treating as transient data failure, no CSPs this run")
+        return []
+    missing = [s for s in symbols if s not in resp]
+    if missing:
+        print(f"[DATA] get_stock_latest_trade missing {len(missing)}/{len(symbols)}: {missing}")
     filtered_symbols = [symbol for symbol in resp if 100*resp[symbol].price <= buying_power_limit]
+    dropped_bp = [s for s in resp if 100*resp[s].price > buying_power_limit]
+    if dropped_bp:
+        print(f"[BP] Dropped over BP limit ${buying_power_limit:.0f}: {[(s, round(100*resp[s].price)) for s in dropped_bp]}")
+    print(f"[DATA] underlying filter: {len(symbols)} in -> {len(filtered_symbols)} after price/BP")
 
     if earnings_map:
         from core.earnings_calendar import is_earnings_risk
@@ -90,8 +100,10 @@ def filter_options(options, min_strike=0, vol_map=None):
     Filter options v2.5.1 with spread + vol adaptive + liquidity volume trend already via underlying filter
     """
     filtered = []
+    rejects = {"no_delta": 0, "delta_range": 0, "low_premium": 0, "no_ask": 0, "spread": 0, "yield": 0, "oi": 0, "strike": 0}
     for contract in options:
         if contract.delta is None:
+            rejects["no_delta"] += 1
             continue
         ad = abs(contract.delta)
 
@@ -102,31 +114,42 @@ def filter_options(options, min_strike=0, vol_map=None):
                 delta_max = vm["delta_max"]
 
         if ad < DELTA_MIN or ad > delta_max:
+            rejects["delta_range"] += 1
             continue
         if not contract.bid_price or contract.bid_price < MIN_PREMIUM:
+            rejects["low_premium"] += 1
             continue
         if not contract.ask_price:
+            rejects["no_ask"] += 1
             continue
         spread_abs = contract.ask_price - contract.bid_price
         spread_pct = _calc_spread_pct(contract.bid_price, contract.ask_price)
         if ad >= 0.30 and spread_abs > SPREAD_NTM_MAX and spread_abs > SPREAD_MAX_ABS:
             if spread_abs > 0.10:
+                rejects["spread"] += 1
                 continue
         else:
             if spread_abs > SPREAD_MAX_ABS and spread_pct > SPREAD_MAX_PCT:
+                rejects["spread"] += 1
                 continue
             if spread_abs > SPREAD_MAX_ABS and spread_pct > 0.08:
                 if spread_abs > 0.30:
+                    rejects["spread"] += 1
                     continue
         y = _calc_yield(contract.bid_price, contract.strike, contract.dte)
         if y < YIELD_MIN or y > YIELD_MAX:
+            rejects["yield"] += 1
             continue
         if contract.oi is not None and contract.oi < OPEN_INTEREST_MIN:
+            rejects["oi"] += 1
             continue
         # Volume trend: if underlying provided via vol_map with avg_5d < 100k, extra OI check
         if contract.strike is None or contract.strike < min_strike:
+            rejects["strike"] += 1
             continue
         filtered.append(contract)
+    if options and not filtered:
+        print(f"[DATA] option filter rejected all {len(options)} contracts: {rejects}")
     return filtered
 
 def score_options(options, fundamentals_map=None, vol_map=None, liquidity_map=None):
