@@ -146,6 +146,18 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             strat_logger.set_market_context(market_context)
 
     if put_options:
+        # Track Alpaca's real options buying power separately from the
+        # risk-cap BP: SGOV doesn't count as options collateral, so opt_bp
+        # is often much lower. Candidates that can't fit are skipped
+        # (smaller ones may still fit) instead of wasting doomed orders.
+        opt_bp = None
+        try:
+            acct = client.get_account()
+            opt_bp = float(getattr(acct, 'options_buying_power', 0) or 0) or None
+            if opt_bp is not None:
+                logger.info(f"Alpaca options buying power: ${opt_bp:.0f} (risk-cap BP ${buying_power:.0f})")
+        except Exception as e:
+            logger.warning(f"Could not read options buying power, using risk-cap BP only: {e}")
         logger.info(f"Scoring {len(put_options)} put options with fund+vol+liq...")
         scores = score_options(put_options, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map)
         selected = select_options(put_options, scores)
@@ -155,7 +167,12 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             if buying_power < need:
                 logger.info(f"Skipping {p.symbol} strike ${p.strike} need ${need} > BP ${buying_power}")
                 continue
+            if opt_bp is not None and opt_bp < need:
+                logger.info(f"Skipping {p.symbol} strike ${p.strike}: needs ${need:.0f} > Alpaca options BP ${opt_bp:.0f}")
+                continue
             buying_power -= need
+            if opt_bp is not None:
+                opt_bp -= need
             score_val = 0
             try:
                 idx = put_options.index(p)
@@ -171,6 +188,8 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             except Exception as e:
                 logger.warning(f"Sell failed for {p.symbol}: {e}")
                 buying_power += need
+                if opt_bp is not None:
+                    opt_bp += need
                 if "buying power" in str(e).lower() or "insufficient" in str(e).lower():
                     logger.info(f"Stopping new CSPs: Alpaca reports insufficient buying power after {p.symbol} - remaining candidates skipped this run")
                     break
