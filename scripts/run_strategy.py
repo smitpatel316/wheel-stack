@@ -129,6 +129,13 @@ def main():
     logger = setup_logger(level=args.log_level, to_file=args.log_to_file)
     strat_logger.set_fresh_start(args.fresh_start)
 
+    # Engine dashboard push: collects this run's account snapshot + per-symbol
+    # scan funnel from the log stream and POSTs them to Optionable at end of
+    # run (core/optionable_dashboard_sync.py). Never raises; display-only.
+    from core.optionable_dashboard_sync import EngineDashboardPush
+    dash_push = EngineDashboardPush()
+    dash_push.install()
+
     SYMBOLS_FILE = Path(__file__).parent.parent / "config" / "symbol_list.txt"
     with open(SYMBOLS_FILE, 'r') as file:
         SYMBOLS = [line.strip() for line in file.readlines()]
@@ -620,6 +627,18 @@ def main():
         strat_logger.save()
     except Exception as e:
         logger.debug(f"Strategy logger save failed: {e}")
+
+    # Push the account snapshot + scan funnel to the Optionable dashboard.
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _h = int(_dt.now(ZoneInfo("America/New_York")).strftime("%H"))
+        _slot = {10: "morning 10:05 ET", 13: "midday 13:05 ET", 15: "afternoon 15:05 ET"}.get(_h, f"run {_h}:05 ET")
+        dash_push.push(client, SYMBOLS, locals().get("allowed_symbols", []), slot=_slot)
+    except Exception as _e:
+        logger.debug(f"dashboard push failed: {_e}")
+    finally:
+        dash_push.uninstall()
 
 if __name__ == "__main__":
     main()
