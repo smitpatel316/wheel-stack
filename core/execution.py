@@ -25,6 +25,59 @@ else:
 
 logger = logging.getLogger(f"strategy.{__name__}")
 
+import math as _math
+
+def _fund_csp_with_sgov(client, need, opt_bp, risk_bp):
+    """Sell just enough SGOV (market) so Alpaca options BP covers a new CSP.
+
+    SGOV doesn't count as options collateral on Alpaca, only cash does.
+    Smit's rule (2026-08-14): engine may sell SGOV same-day to fund a put,
+    market orders, never exceed what the risk cap allows. Returns True if the
+    sale was submitted AND a post-sale account refresh shows enough BP.
+    Never sells more SGOV than (need - opt_bp) plus a small buffer, and never
+    when the risk cap itself can't cover the put.
+    """
+    deficit = need - (opt_bp or 0)
+    if risk_bp < need:
+        return False
+    try:
+        sgov_qty = 0
+        for pos in client.get_positions():
+            if getattr(pos, 'symbol', '') == 'SGOV':
+                sgov_qty = int(float(pos.qty))
+                break
+        if sgov_qty <= 0:
+            logger.warning("[SGOV FUND] Wanted to fund CSP but no SGOV held")
+            return False
+        try:
+            latest = client.get_stock_latest_trade("SGOV")
+            trade = latest.get("SGOV") if isinstance(latest, dict) else None
+            price = float(getattr(trade, 'price', 0) or (trade.get('p') if isinstance(trade, dict) else 0) or 100.5)
+        except Exception:
+            price = 100.5
+        shares = min(sgov_qty, max(1, _math.ceil((deficit + 150) / price)))
+        logger.info(f"[SGOV FUND] Selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${deficit:.0f} options-BP deficit for new CSP")
+        order = client.market_sell_qty("SGOV", shares)
+        # wait briefly for the paper fill, then re-check BP
+        for _ in range(6):
+            time.sleep(2)
+            try:
+                o = client.get_order(order.id)
+                if str(getattr(o, 'status', '')).lower() in ('filled', 'orderstatus.filled'):
+                    break
+            except Exception:
+                pass
+        new_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
+        logger.info(f"[SGOV FUND] Post-sale options BP ${new_bp:.0f} (was ${opt_bp:.0f}, need ${need:.0f})")
+        if new_bp >= need:
+            return True
+        logger.warning(f"[SGOV FUND] Sale did not free enough options BP (market closed or fill pending?) - skipping candidate")
+        return False
+    except Exception as e:
+        logger.warning(f"[SGOV FUND] failed: {e}")
+        return False
+
+
 def calc_mid_price(contract_obj) -> float:
     try:
         bid = float(getattr(contract_obj, 'bid_price', 0) or 0)
@@ -105,7 +158,7 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
             logger.warning(f"Market fallback also failed {symbol}: {e2}")
             raise
 
-def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_context=None, earnings_map=None, dividend_map=None, fundamentals_map=None, vol_map=None, liquidity_map=None, execution_config=None):
+def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_context=None, earnings_map=None, dividend_map=None, fundamentals_map=None, vol_map=None, liquidity_map=None, execution_config=None, fund_with_sgov=False):
     if not allowed_symbols or buying_power <= 0:
         return
     execution_config = execution_config or {}
@@ -168,8 +221,17 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 logger.info(f"Skipping {p.symbol} strike ${p.strike} need ${need} > BP ${buying_power}")
                 continue
             if opt_bp is not None and opt_bp < need:
-                logger.info(f"Skipping {p.symbol} strike ${p.strike}: needs ${need:.0f} > Alpaca options BP ${opt_bp:.0f}")
-                continue
+                funded = False
+                if fund_with_sgov:
+                    funded = _fund_csp_with_sgov(client, need, opt_bp, buying_power)
+                    if funded:
+                        try:
+                            opt_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
+                        except Exception:
+                            pass
+                if opt_bp is None or opt_bp < need:
+                    logger.info(f"Skipping {p.symbol} strike ${p.strike}: needs ${need:.0f} > Alpaca options BP ${opt_bp if opt_bp is not None else 0:.0f}" + ("" if fund_with_sgov else " (SGOV funding disabled)"))
+                    continue
             buying_power -= need
             if opt_bp is not None:
                 opt_bp -= need
