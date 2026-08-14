@@ -116,7 +116,7 @@ def sync_sgov_real(client, logger, risk_override=None):
             logger.info(f"[SGOV SWEEP] Buying {diff} SGOV @ ${sgov_price:.2f} to earn interest on ${diff*sgov_price:.0f} collateral (Fidelity SPAXX sweep)")
             place_sgov_limit_order(client, "buy", diff, logger_obj=logger)
         elif diff < 0:
-            logger.info(f"[SGOV] Selling {abs(diff)} SGOV via limit (need cash for assignment)")
+            logger.info(f"[SGOV] Selling {abs(diff)} SGOV at market (need cash for assignment)")
             place_sgov_limit_order(client, "sell", abs(diff), logger_obj=logger)
         else:
             logger.info(f"[SGOV] At sweep target {target_shares} shares earning ${monthly_interest_real:.2f}/mo - perfect SPAXX wrapper")

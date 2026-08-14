@@ -344,8 +344,11 @@ def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, mar
         logger.info(f"No viable call options found for {symbol}")
 
 def place_sgov_limit_order(client, side: str, qty: int, logger_obj=None):
-    """SGOV orders. Per Smit 2026-08-05: plain market orders — SGOV is liquid
-    enough that the 1c limit-order dance isn't worth the unfilled risk."""
+    """SGOV sweep orders — MARKET both ways despite the legacy name.
+    Per Smit 2026-08-05 and reconfirmed 2026-08-14: SGOV is the sweep vehicle;
+    buy with sitting cash, sell when cash is needed (CSP funding or assignment),
+    always at market for instant fills. Renaming the function would touch every
+    caller for zero behavior change, so the name stays."""
     log = logger_obj or logger
     try:
         if side.lower() == "buy":
