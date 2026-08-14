@@ -77,7 +77,7 @@ def evaluate_close_need(candidate: RollCandidate, config: Dict = None) -> CloseD
                 should_close=False,
                 close_type="none",
                 profit_pct=candidate.profit_pct,
-                profit_dollars=(candidate.avg_entry_price - candidate.current_price) * 100 * abs(candidate.qty),
+                profit_dollars=((candidate.avg_entry_price or 0) - (candidate.current_price or 0)) * 100 * abs(candidate.qty or 0),
                 reasons=[f"DTE {candidate.dte} <= {dte_min} too close to expiry, hold for expiration unless 75%+ profit"],
                 urgency="low",
                 decision_factors={"dte": candidate.dte, "profit_pct": candidate.profit_pct, "blocked_dte": True}

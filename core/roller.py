@@ -210,6 +210,9 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
 
     targets = []
     close_cost = candidate.current_price
+    if close_cost is None:
+        logger.warning(f"[ROLLER] No current price for {candidate.symbol} - cannot compute roll net credit, skipping")
+        return []
 
     for c in available_contracts:
         if c.underlying != candidate.underlying:
