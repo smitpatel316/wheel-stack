@@ -67,13 +67,29 @@ def sync_sgov_real(client, logger, risk_override=None):
         cash = float(acct.cash)
         equity = float(acct.equity)
         stock_bp = float(getattr(acct, 'buying_power', 0) or 0)
+        opt_bp_sweep = float(getattr(acct, 'options_buying_power', 0) or 0)
         cashBuffer = 500.0  # keep $500 cash for fees
+
+        # T+1 funding queue: cash earmarked for queued CSP candidates must NOT
+        # be swept back into SGOV (that buy-back was the churn removed
+        # 2026-08-17). Reserve the part not already covered by settled BP.
+        queue_reserve = 0.0
+        try:
+            from core.funding_queue import FundingQueue
+            _q = FundingQueue().load()
+            _q.expire()
+            _q.save()
+            queue_reserve = _q.reserve_amount(opt_bp_sweep)
+            if queue_reserve > 0:
+                logger.info(f"[SGOV] Holding back ${queue_reserve:.0f} from sweep for {len(_q.entries)} queued CSP candidate(s) (T+1 funding)")
+        except Exception as _qe:
+            logger.debug(f"[SGOV] funding-queue reserve check failed: {_qe}")
 
         # v2.5.3 sweep model: all cash including put collateral earns interest via SGOV/SPAXX
         # Fidelity SPAXX sweep: cash + money market both count as CSP collateral, so we sweep 99% cash to SGOV
         # Alpaca paper limitation: SGOV is stock, not cash, so stock BP limits sweep (see failed buy log above)
         total_liquid = cash + sgov_mv  # total money market + cash
-        target_sweep_mv_ideal = max(0, total_liquid - cashBuffer)  # ideal Fidelity model: sweep all
+        target_sweep_mv_ideal = max(0, total_liquid - cashBuffer - queue_reserve)  # ideal Fidelity model: sweep all (minus queued-CSP reserve)
         # Alpaca realistic: limited by stock BP because SGOV is equity, not cash collateral
         max_sgov_affordable = stock_bp - 1000  # keep $1k buffer for stock BP
         target_sweep_mv_real = min(target_sweep_mv_ideal, max(0, max_sgov_affordable + sgov_mv))
@@ -154,6 +170,35 @@ def main():
             strat_logger.log_entry["market_open"] = is_market_open
     except Exception as e:
         logger.debug(f"Clock check failed, assume open: {e}")
+
+    # --- Phase 0.0 Robinhood shadow feed (read-only validation, 2026-08-17) ---
+    # Compares RH quotes against Alpaca for the watchlist + every CSP
+    # candidate. Pure observation: RH data never influences trade decisions.
+    # Any failure disables the feed for the run; Alpaca remains the truth.
+    rh_feed = None
+    try:
+        from core.robinhood_feed import RobinhoodFeed
+        _rf = RobinhoodFeed.from_env(log=logger)
+        if _rf.enabled:
+            rh_feed = _rf
+            logger.info("[RH] shadow feed enabled - comparing Alpaca vs Robinhood quotes this run")
+            try:
+                _trades = client.get_stock_latest_trade(SYMBOLS)
+                _px = {}
+                for s in SYMBOLS:
+                    t = _trades.get(s) if isinstance(_trades, dict) else None
+                    p = getattr(t, 'price', None) or (t.get('price') if isinstance(t, dict) else None)
+                    if p:
+                        _px[s] = float(p)
+                if _px:
+                    rh_feed.compare_underlyings(_px)
+                    logger.info(f"[RH] underlying compare done for {len(_px)} symbols")
+            except Exception as _ue:
+                logger.warning(f"[RH] underlying comparison failed (continuing): {_ue}")
+        else:
+            logger.info(f"[RH] shadow feed disabled: {_rf.disabled_reason}")
+    except Exception as e:
+        logger.warning(f"[RH] feed init failed (continuing without RH): {e}")
 
     # --- Phase 0.1 Earnings v2.5 503 proof + NVDA ---
     earnings_map = {}
@@ -601,9 +646,15 @@ def main():
             logger.info(f"[CLOCK] Market CLOSED - skipping new CSP sells (closer/roller already evaluated)")
         elif buying_power >= 2000 and (opt_bp >= 2000 or total_liq_check >= 2000):
             # Fidelity SPAXX: even if opt_bp low after sweep, total liquid (cash+SGOV) still secures puts
-            sell_puts(client, allowed_symbols, buying_power, strat_logger, market_context=market_ctx, earnings_map=earnings_map if EARNINGS_ENABLED else None, dividend_map=dividend_map, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map, execution_config={"limit_enabled": LIMIT_ORDER_ENABLED, "wait_seconds": LIMIT_WAIT_SECONDS}, fund_with_sgov=os.getenv("SGOV_FUND_CSP", "true").lower() in ("1", "true", "yes"))
+            sell_puts(client, allowed_symbols, buying_power, strat_logger, market_context=market_ctx, earnings_map=earnings_map if EARNINGS_ENABLED else None, dividend_map=dividend_map, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map, execution_config={"limit_enabled": LIMIT_ORDER_ENABLED, "wait_seconds": LIMIT_WAIT_SECONDS}, fund_with_sgov=os.getenv("SGOV_FUND_CSP", "true").lower() in ("1", "true", "yes"), rh_feed=rh_feed)
         else:
             logger.info(f"[WHEEL] Insufficient BP stock ${buying_power:.0f} options ${opt_bp:.0f} total_liq ${total_liq_check:.0f} < $2000 min, skipping new CSPs Option A wait - SGOV sweep holds ${total_liq_check:.0f} earning interest")
+
+    if rh_feed is not None:
+        try:
+            logger.info(rh_feed.summary())
+        except Exception:
+            pass
 
     sync_sgov_real(client, logger)
 

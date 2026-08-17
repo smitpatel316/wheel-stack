@@ -26,20 +26,29 @@ else:
 logger = logging.getLogger(f"strategy.{__name__}")
 
 import math as _math
+from .funding_queue import FundingQueue
 
-def _fund_csp_with_sgov(client, need, opt_bp, risk_bp):
-    """Sell just enough SGOV (market) so Alpaca options BP covers a new CSP.
+def _prefund_queue_with_sgov(client, deficit, risk_bp, queue):
+    """ONE SGOV market sale per run to pre-fund the next-day CSP queue.
 
-    SGOV doesn't count as options collateral on Alpaca, only cash does.
-    Smit's rule (2026-08-14): engine may sell SGOV same-day to fund a put,
-    market orders, never exceed what the risk cap allows. Returns True if the
-    sale was submitted AND a post-sale account refresh shows enough BP.
-    Never sells more SGOV than (need - opt_bp) plus a small buffer, and never
-    when the risk cap itself can't cover the put.
+    Replaces same-day funding (removed 2026-08-17): Alpaca options BP counts
+    settled cash only (T+1), so a same-day SGOV sale can never fund a CSP in
+    the same run — it just churned SGOV (5 sell+buy round-trips in one run).
+    Now: queued candidates wait for next-day settled cash, and we sell SGOV
+    once, sized to the queue's remaining deficit, so tomorrow's run is funded.
+
+    Never sells when settled-cash BP + already-prefunded cash covers the queue
+    (deficit<=0), never more than the risk cap allows, never more than held.
     """
-    deficit = need - (opt_bp or 0)
-    if risk_bp < need:
-        return False
+    if deficit <= 0:
+        return 0.0
+    if queue.broken:
+        logger.warning("[SGOV FUND] Queue file unreadable - refusing to pre-fund off unknown state")
+        return 0.0
+    amount = min(deficit, max(risk_bp, 0))
+    if amount <= 0:
+        logger.info(f"[SGOV FUND] Risk cap exhausted - cannot pre-fund queue (deficit ${deficit:.0f})")
+        return 0.0
     try:
         sgov_qty = 0
         for pos in client.get_positions():
@@ -47,46 +56,24 @@ def _fund_csp_with_sgov(client, need, opt_bp, risk_bp):
                 sgov_qty = int(float(pos.qty))
                 break
         if sgov_qty <= 0:
-            logger.warning("[SGOV FUND] Wanted to fund CSP but no SGOV held")
-            return False
+            logger.warning("[SGOV FUND] Wanted to pre-fund queue but no SGOV held")
+            return 0.0
         try:
             latest = client.get_stock_latest_trade("SGOV")
             trade = latest.get("SGOV") if isinstance(latest, dict) else None
             price = float(getattr(trade, 'price', 0) or (trade.get('p') if isinstance(trade, dict) else 0) or 100.5)
         except Exception:
             price = 100.5
-        shares = min(sgov_qty, max(1, _math.ceil((deficit + 150) / price)))
-        logger.info(f"[SGOV FUND] Selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${deficit:.0f} options-BP deficit for new CSP")
+        shares = min(sgov_qty, max(1, _math.ceil((amount + 150) / price)))
+        logger.info(f"[SGOV FUND] Pre-funding next-day queue: selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${amount:.0f} deficit (settles T+1)")
         order = client.market_sell_qty("SGOV", shares)
-        # Alpaca's options_buying_power lags the equity fill (observed
-        # 2026-08-17: SGOV filled but BP unchanged for >12s, so candidates
-        # got skipped twice in one day). Poll BP directly for up to ~90s
-        # until it covers the need, instead of a fixed short wait.
-        deadline = time.time() + 90
-        new_bp = opt_bp or 0
-        while time.time() < deadline:
-            time.sleep(3)
-            try:
-                o = client.get_order(order.id)
-                st = str(getattr(o, 'status', '')).lower()
-                if st in ('canceled', 'cancelled', 'rejected', 'expired'):
-                    break
-            except Exception:
-                pass
-            try:
-                new_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
-            except Exception:
-                continue
-            if new_bp >= need:
-                break
-        logger.info(f"[SGOV FUND] Post-sale options BP ${new_bp:.0f} (was ${opt_bp:.0f}, need ${need:.0f})")
-        if new_bp >= need:
-            return True
-        logger.warning(f"[SGOV FUND] Sale did not free enough options BP (market closed or fill pending?) - skipping candidate")
-        return False
+        sold = shares * price
+        queue.record_prefund(sold)
+        logger.info(f"[SGOV FUND] Pre-fund sale submitted (order {getattr(order, 'id', '?')}); queue prefunded total now ${queue.prefunded:.0f}")
+        return sold
     except Exception as e:
-        logger.warning(f"[SGOV FUND] failed: {e}")
-        return False
+        logger.warning(f"[SGOV FUND] pre-fund failed: {e}")
+        return 0.0
 
 
 def calc_mid_price(contract_obj) -> float:
@@ -169,7 +156,7 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
             logger.warning(f"Market fallback also failed {symbol}: {e2}")
             raise
 
-def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_context=None, earnings_map=None, dividend_map=None, fundamentals_map=None, vol_map=None, liquidity_map=None, execution_config=None, fund_with_sgov=False):
+def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_context=None, earnings_map=None, dividend_map=None, fundamentals_map=None, vol_map=None, liquidity_map=None, execution_config=None, fund_with_sgov=False, rh_feed=None):
     if not allowed_symbols or buying_power <= 0:
         return
     execution_config = execution_config or {}
@@ -226,23 +213,43 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
         scores = score_options(put_options, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map)
         selected = select_options(put_options, scores)
 
+        # Robinhood shadow comparison (read-only, observational). Alpaca stays
+        # the source of truth; RH data never influences what we sell.
+        if rh_feed is not None:
+            for p in selected:
+                try:
+                    rh_feed.compare_put(p)
+                except Exception as e:
+                    logger.debug(f"[RH] compare failed for {p.symbol}: {e}")
+            logger.info(rh_feed.summary())
+
+        # T+1 funding queue: candidates that settled-cash options BP can't
+        # cover THIS run are skipped and queued for next-day funding; one SGOV
+        # sale per run pre-funds the queue. The queue is hints only — every
+        # entry is re-validated fresh by the scan on later runs.
+        queue = FundingQueue().load()
+        queue.expire()
+        newly_queued = 0
+
         for p in selected:
             need = 100 * p.strike
             if buying_power < need:
                 logger.info(f"Skipping {p.symbol} strike ${p.strike} need ${need} > BP ${buying_power}")
                 continue
             if opt_bp is not None and opt_bp < need:
-                funded = False
-                if fund_with_sgov:
-                    funded = _fund_csp_with_sgov(client, need, opt_bp, buying_power)
-                    if funded:
-                        try:
-                            opt_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
-                        except Exception:
-                            pass
-                if opt_bp is None or opt_bp < need:
-                    logger.info(f"Skipping {p.symbol} strike ${p.strike}: needs ${need:.0f} > Alpaca options BP ${opt_bp if opt_bp is not None else 0:.0f}" + ("" if fund_with_sgov else " (SGOV funding disabled)"))
-                    continue
+                # Never sell SGOV for a same-day fill (T+1 makes it pointless
+                # churn); queue the candidate so tomorrow's settled cash funds it.
+                score_val = 0
+                try:
+                    score_val = scores[put_options.index(p)]
+                except Exception:
+                    pass
+                if queue.add(p.symbol, p.underlying, p.strike, p.expiration, need, score_val):
+                    newly_queued += 1
+                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} > settled options BP ${opt_bp:.0f} - queued for next-day funding (T+1), re-validated fresh tomorrow")
+                else:
+                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} > settled options BP ${opt_bp:.0f} - already queued, still unfunded")
+                continue
             buying_power -= need
             if opt_bp is not None:
                 opt_bp -= need
@@ -273,6 +280,7 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 push_trade_to_optionable(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1, delta=getattr(p, 'delta', None))
             except Exception as e:
                 logger.warning(f"Optionable sync failed for {p.symbol}: {e}")
+            queue.mark_filled(p.symbol)
 
             if strat_logger:
                 d = p.to_dict()
@@ -283,6 +291,20 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                     d["price_improvement"] = exec_result.get("improvement", 0)
                 strat_logger.log_sold_puts(d)
                 strat_logger.log_detailed_trade(d, score=score_val, decision_type="new_put", market_context=market_context)
+
+        # One SGOV sale per run to pre-fund the whole queue (T+1: proceeds
+        # settle overnight, tomorrow's run funds queued candidates from
+        # settled cash). Never when settled BP + earlier pre-funds cover it.
+        if fund_with_sgov and queue.entries:
+            deficit = queue.prefund_deficit(opt_bp)
+            if deficit > 0:
+                _prefund_queue_with_sgov(client, deficit, buying_power, queue)
+            else:
+                logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) already covered by settled BP/prefunded cash - no SGOV sale")
+        elif queue.entries:
+            logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) but SGOV funding disabled - no pre-fund sale")
+        if queue.dirty:
+            queue.save()
     else:
         logger.info("No put options found with sufficient delta and open interest.")
 

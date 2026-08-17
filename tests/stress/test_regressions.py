@@ -2,7 +2,8 @@
 from datetime import date, timedelta
 
 from core.strategy import filter_underlying
-from core.execution import sell_puts, sell_calls, _fund_csp_with_sgov
+from core.execution import sell_puts, sell_calls, _prefund_queue_with_sgov
+from core.funding_queue import FundingQueue
 from tests.stress.fakes import FakeBrokerClient, FakeAccount, make_put
 
 
@@ -94,7 +95,11 @@ class TestOptionsBpSkip:
 
 
 class TestSgovFunding:
-    """R4: 5115019 — SGOV same-day funding of CSPs."""
+    """R4 (rewritten 2026-08-17): T+1 queue-based funding replaces same-day
+    SGOV funding. Same-day sales never freed options BP in time (settled cash
+    only), so the candidate was skipped and the sweep bought the SGOV right
+    back — the Aug 17 15:05 ET run churned ~$165k this way. New contract:
+    skip the CSP, queue it for next-day funding, ONE pre-fund sale per run."""
 
     def _rich_client(self, opt_bp, sgov_qty, sgov_price=100.50):
         c = _client_with_puts([("AMD", 440, 10.0, -0.25)], opt_bp=opt_bp)
@@ -102,65 +107,164 @@ class TestSgovFunding:
             c.add_sgov(sgov_qty, sgov_price)
         return c
 
-    def test_r4a_sale_fills_put_proceeds(self):
+    def test_r4a_underfunded_candidate_queued_never_sold_same_day(self):
         c = self._rich_client(opt_bp=13_000, sgov_qty=500)
-        c.sgov_sale_credits_bp = True  # emulate Alpaca: filled SGOV sale frees options BP
+        c.sgov_sale_credits_bp = True  # even if BP *did* move same-day, we no longer try
         sell_puts(c, ["AMD"], 500_000,
                   execution_config={"limit_enabled": False, "wait_seconds": 0},
                   fund_with_sgov=True)
+        assert not c.option_sells, "T+1: candidate must wait for next-day settled cash"
+        assert len(c.stock_sells) == 1, "exactly one pre-fund SGOV sale for the queue"
         sym, qty = c.stock_sells[0]
         assert sym == "SGOV"
         # deficit = 44000-13000 = 31000; +150 buffer; /100.50 -> ceil = 310
         assert qty == 310
-        assert any("AMD" in s for s in c.option_sells), "funded candidate must proceed to the put sale"
+        q = FundingQueue().load()
+        assert len(q.entries) == 1 and q.entries[0]["underlying"] == "AMD"
+        assert q.prefunded > 0
 
-    def test_r4b_bp_still_short_skips_cleanly(self):
-        c = self._rich_client(opt_bp=13_000, sgov_qty=500)
-        sell_puts(c, ["AMD"], 500_000,
+    def test_r4b_multiple_candidates_single_prefund_sale(self):
+        c = _client_with_puts([("AMD", 440, 10.0, -0.25), ("INTC", 90, 2.0, -0.25)],
+                              opt_bp=2_000)
+        c.add_sgov(600)
+        sell_puts(c, ["AMD", "INTC"], 500_000,
                   execution_config={"limit_enabled": False, "wait_seconds": 0},
                   fund_with_sgov=True)
-        assert not c.option_sells, "fake BP never rises -> put must NOT be sold"
+        assert not c.option_sells
+        assert len(c.stock_sells) == 1, "the churn bug was one sale per candidate; must be one per run"
+        q = FundingQueue().load()
+        assert len(q.entries) == 2
+        assert q.prefunded >= 51_000  # 44000 + 9000 - 2000 BP
 
-    def test_r4c_sgov_sale_throws_no_put(self):
+    def test_r4c_sgov_sale_throws_queue_survives_no_crash(self):
         c = self._rich_client(opt_bp=13_000, sgov_qty=500)
         c.raise_on_stock_sell = Exception("market data unavailable")
         sell_puts(c, ["AMD"], 500_000,
                   execution_config={"limit_enabled": False, "wait_seconds": 0},
                   fund_with_sgov=True)
         assert not c.option_sells
+        q = FundingQueue().load()
+        assert len(q.entries) == 1 and q.prefunded == 0, "failed sale must not be credited as prefunded"
 
-    def test_r4d_no_sgov_held_skips(self):
+    def test_r4d_no_sgov_held_queues_without_sale(self):
         c = self._rich_client(opt_bp=13_000, sgov_qty=0)
         sell_puts(c, ["AMD"], 500_000,
                   execution_config={"limit_enabled": False, "wait_seconds": 0},
                   fund_with_sgov=True)
         assert not c.option_sells and not c.stock_sells
+        assert len(FundingQueue().load().entries) == 1
 
-    def test_r4e_deficit_rounds_up_and_caps_at_holdings(self):
-        c = self._rich_client(opt_bp=13_900, sgov_qty=100)  # deficit 30,100 -> 301 shares but only 100 held
-        _fund_csp_with_sgov(c, need=44_000, opt_bp=13_900, risk_bp=500_000)
+    def test_r4e_prefund_caps_at_holdings(self):
+        c = self._rich_client(opt_bp=13_900, sgov_qty=100)
+        q = FundingQueue().load()
+        q.add("AMD260918P00440000", "AMD", 440.0, "2026-09-18", 44_000)
+        sold = _prefund_queue_with_sgov(c, deficit=30_100, risk_bp=500_000, queue=q)
         sym, qty = c.stock_sells[0]
         assert qty == 100, "must cap at SGOV holdings"
+        assert sold == 100 * 100.50
 
-    def test_r4f_risk_cap_short_never_attempts_sale(self):
+    def test_r4f_risk_cap_bounds_prefund(self):
         c = self._rich_client(opt_bp=13_000, sgov_qty=500)
-        ok = _fund_csp_with_sgov(c, need=44_000, opt_bp=13_000, risk_bp=20_000)
-        assert ok is False and not c.stock_sells, "risk cap shortfall must block the SGOV sale"
+        q = FundingQueue().load()
+        q.add("AMD260918P00440000", "AMD", 440.0, "2026-09-18", 44_000)
+        _prefund_queue_with_sgov(c, deficit=31_000, risk_bp=20_000, queue=q)
+        sym, qty = c.stock_sells[0]
+        # capped at risk cap 20000 -> ceil(20150/100.50) = 201
+        assert qty == 201, "pre-fund must never exceed the risk cap"
+        q2 = FundingQueue().load()
+        q2.add("X", "X", 1.0, None, 1.0)
+        sold = _prefund_queue_with_sgov(c, deficit=10.0, risk_bp=0, queue=q2)
+        assert sold == 0 and len(c.stock_sells) == 1, "zero risk cap -> no sale"
 
-    def test_r4g_pending_fill_skips_without_put(self):
-        c = self._rich_client(opt_bp=13_000, sgov_qty=500)
-        c.auto_fill = False  # market closed: order stays accepted
-        # shorten the fill wait so the test is fast
-        import core.execution as ex
-        orig_sleep = ex.time.sleep
-        ex.time.sleep = lambda *_: None
-        try:
+    def test_r4g_second_run_same_day_no_double_sell(self):
+        c = self._rich_client(opt_bp=13_000, sgov_qty=900)
+        for _ in range(2):  # midday + afternoon runs, same queue file
             sell_puts(c, ["AMD"], 500_000,
                       execution_config={"limit_enabled": False, "wait_seconds": 0},
                       fund_with_sgov=True)
-        finally:
-            ex.time.sleep = orig_sleep
-        assert not c.option_sells, "pending SGOV fill -> put must not be sold"
+        assert len(c.stock_sells) == 1, "prefund ledger must stop a second same-day sale for the same entries"
+
+    def test_r4h_next_day_settled_cash_fills_and_clears_queue(self):
+        c = self._rich_client(opt_bp=13_000, sgov_qty=500)
+        sell_puts(c, ["AMD"], 500_000,
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert not c.option_sells
+        # Next morning: sale settled -> options BP now covers the candidate
+        c.account.options_buying_power = 100_000
+        sell_puts(c, ["AMD"], 500_000,
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert any("AMD" in s for s in c.option_sells), "settled cash must fund the queued candidate"
+        assert len(c.stock_sells) == 1, "no new SGOV sale once BP covers"
+        assert not FundingQueue().load().entries, "filled candidate must leave the queue"
+
+    def test_r4i_queue_entries_expire_after_one_trading_day(self):
+        from datetime import date as _date, timedelta as _td
+        today = _date.today()
+        stale = today - _td(days=2)
+        q = FundingQueue(today=today)
+        q.add("OLD260918P00440000", "OLD", 440.0, "2026-09-18", 44_000)
+        q.entries[0]["valid_for"] = (today - _td(days=1)).isoformat()  # valid yesterday only
+        q.prefunded = 44_000
+        q.dirty = True
+        q.save()
+        q2 = FundingQueue(today=today).load()
+        dropped = q2.expire()
+        assert len(dropped) == 1 and not q2.entries
+        assert q2.prefunded == 0, "expiring an entry must release its prefunded cash back to the sweep"
+
+    def test_r4j_corrupt_queue_disables_prefunding(self):
+        from core.funding_queue import queue_path
+        queue_path().write_text("{not json")
+        c = self._rich_client(opt_bp=13_000, sgov_qty=500)
+        sell_puts(c, ["AMD"], 500_000,
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert not c.stock_sells, "corrupt queue state must fail safe: no SGOV sale off unknown state"
+
+    def test_r4k_funding_disabled_still_queues_but_never_sells(self):
+        c = self._rich_client(opt_bp=13_000, sgov_qty=500)
+        sell_puts(c, ["AMD"], 500_000,
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=False)
+        assert not c.option_sells and not c.stock_sells
+        assert len(FundingQueue().load().entries) == 1
+
+
+class TestFundingQueueMath:
+    """The SGOV sweep in run_strategy reserves cash via reserve_amount; the
+    pre-fund sale sizes itself via prefund_deficit. Both must be exact."""
+
+    def test_reserve_is_pending_minus_settled_bp(self):
+        q = FundingQueue()
+        q.add("A", "A", 100.0, "2026-09-18", 10_000)
+        q.add("B", "B", 200.0, "2026-09-18", 20_000)
+        assert q.reserve_amount(opt_bp=25_000) == 5_000
+        assert q.reserve_amount(opt_bp=30_000) == 0
+        assert q.reserve_amount(opt_bp=None) == 30_000
+
+    def test_prefund_deficit_subtracts_bp_and_prefunded(self):
+        q = FundingQueue()
+        q.add("A", "A", 100.0, "2026-09-18", 10_000)
+        q.record_prefund(4_000)
+        assert q.prefund_deficit(opt_bp=3_000) == 3_000
+        assert q.prefund_deficit(opt_bp=6_500) == 0, "settled BP + prefunded covers -> never sell"
+
+    def test_mark_filled_releases_prefund(self):
+        q = FundingQueue()
+        q.add("A", "A", 100.0, "2026-09-18", 10_000)
+        q.add("B", "B", 200.0, "2026-09-18", 20_000)
+        q.record_prefund(30_000)
+        q.mark_filled("A")
+        assert q.prefunded == 20_000 and len(q.entries) == 1
+        assert q.mark_filled("NOPE") is False
+
+    def test_next_trading_day_skips_weekend(self):
+        from core.funding_queue import next_trading_day
+        from datetime import date as _d
+        assert next_trading_day(_d(2026, 8, 14)) == _d(2026, 8, 17)  # Fri -> Mon
+        assert next_trading_day(_d(2026, 8, 17)) == _d(2026, 8, 18)  # Mon -> Tue
 
 
 class TestOptionableSyncIsolation:

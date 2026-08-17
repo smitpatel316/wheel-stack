@@ -20,3 +20,17 @@ def _no_optionable_network(monkeypatch):
 
     monkeypatch.setattr(osync, "alive", lambda: False)
     monkeypatch.setattr(osync, "OPTIONABLE_URL", "http://127.0.0.1:9")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_funding_queue(monkeypatch, tmp_path):
+    """Never let tests read/write the production funding queue."""
+    monkeypatch.setenv("WHEEL_FUNDING_QUEUE", str(tmp_path / "funding_queue.json"))
+
+
+@pytest.fixture(autouse=True)
+def _no_robinhood_feed(monkeypatch):
+    """The RH shadow feed shells out to rh_mcp_client (real network). The
+    stress suite must stay fully offline: no code path under test may reach
+    for it."""
+    monkeypatch.setenv("RH_COMPARE_ENABLED", "false")
