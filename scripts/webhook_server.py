@@ -8,6 +8,7 @@ Behavior (from config/webhook_config.json + docs/deployment.md):
                                        cache so the next strategy run refetches.
 - Secret comes from FINNHUB_WEBHOOK_SECRET env, falling back to config/webhook_config.json.
 """
+import hmac
 import json
 import os
 import sys
@@ -15,12 +16,22 @@ import time
 import http.server
 import socketserver
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / "logs"
 EVENTS_LOG = LOGS / "webhook_events.jsonl"
 EARNINGS_CACHE = LOGS / "earnings_cache.json"
 PORT = int(os.environ.get("WEBHOOK_PORT", "8644"))
+
+# Robinhood Agentic Trading MCP OAuth callback (read-only connector project).
+# https://webhook.smitpatel.net/oauth/robinhood/callback routes here via the
+# Cloudflare tunnel. State is validated against pending_auth.json written by
+# rh_mcp_client.py `auth`; the code is stashed for rh_mcp_client.py `finish`.
+RH_DIR = Path(os.environ.get(
+    "RH_MCP_DIR", str(Path.home() / "workspace" / "robinhood-mcp")))
+RH_PENDING = RH_DIR / "pending_auth.json"
+RH_CALLBACK = RH_DIR / "callback_result.json"
 
 
 def load_secret() -> str:
@@ -52,8 +63,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._json(200, {"status": "ok", "platform": "webhook"})
+        elif urlsplit(self.path).path == "/oauth/robinhood/callback":
+            self._rh_oauth_callback(parse_qs(urlsplit(self.path).query))
         else:
             self._json(404, {"error": "not found"})
+
+    def _html(self, code: int, title: str, msg: str):
+        body = (f"<!doctype html><html><head><title>{title}</title></head>"
+                f"<body style=\"font-family:sans-serif;text-align:center;"
+                f"padding-top:4em\"><h2>{title}</h2><p>{msg}</p></body></html>"
+                ).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _rh_oauth_callback(self, qs: dict):
+        state = (qs.get("state") or [""])[0]
+        code = (qs.get("code") or [""])[0]
+        error = (qs.get("error") or [""])[0]
+        try:
+            expected = json.loads(RH_PENDING.read_text()).get("state", "")
+        except Exception:
+            expected = ""
+        if not expected or not state or not hmac.compare_digest(expected, state):
+            self._html(400, "Robinhood callback rejected",
+                       "State mismatch or no pending authorization. "
+                       "Run <code>rh_mcp_client.py auth</code> again.")
+            return
+        RH_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = RH_CALLBACK.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "code": code or None,
+            "state": state,
+            "error": error or None,
+            "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }))
+        os.replace(tmp, RH_CALLBACK)
+        os.chmod(RH_CALLBACK, 0o600)
+        if error:
+            self._html(200, "Authorization failed",
+                       f"Robinhood returned an error ({error}). "
+                       "You can close this tab.")
+        else:
+            self._html(200, "Robinhood connected",
+                       "Authorization received. You can close this tab.")
 
     def do_POST(self):
         if self.path != "/webhooks/finnhub-earnings":
