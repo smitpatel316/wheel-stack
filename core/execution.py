@@ -58,16 +58,27 @@ def _fund_csp_with_sgov(client, need, opt_bp, risk_bp):
         shares = min(sgov_qty, max(1, _math.ceil((deficit + 150) / price)))
         logger.info(f"[SGOV FUND] Selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${deficit:.0f} options-BP deficit for new CSP")
         order = client.market_sell_qty("SGOV", shares)
-        # wait briefly for the paper fill, then re-check BP
-        for _ in range(6):
-            time.sleep(2)
+        # Alpaca's options_buying_power lags the equity fill (observed
+        # 2026-08-17: SGOV filled but BP unchanged for >12s, so candidates
+        # got skipped twice in one day). Poll BP directly for up to ~90s
+        # until it covers the need, instead of a fixed short wait.
+        deadline = time.time() + 90
+        new_bp = opt_bp or 0
+        while time.time() < deadline:
+            time.sleep(3)
             try:
                 o = client.get_order(order.id)
-                if str(getattr(o, 'status', '')).lower() in ('filled', 'orderstatus.filled'):
+                st = str(getattr(o, 'status', '')).lower()
+                if st in ('canceled', 'cancelled', 'rejected', 'expired'):
                     break
             except Exception:
                 pass
-        new_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
+            try:
+                new_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
+            except Exception:
+                continue
+            if new_bp >= need:
+                break
         logger.info(f"[SGOV FUND] Post-sale options BP ${new_bp:.0f} (was ${opt_bp:.0f}, need ${need:.0f})")
         if new_bp >= need:
             return True
