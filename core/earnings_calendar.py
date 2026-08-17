@@ -1,9 +1,11 @@
 import os
+import io
+import csv
 import json
 import time
 from pathlib import Path
 from datetime import date, timedelta, datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "earnings_cache.json"
@@ -24,10 +26,14 @@ def get_alpha_key():
     except Exception:
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
-def fetch_earnings_finnhub(from_date: date, to_date: date) -> List[Dict]:
+def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict]]:
+    """Returns the calendar list, or None on failure (distinct from a
+    genuinely empty calendar, which returns []). Callers rely on this to
+    decide whether to fall back / retain stale data."""
     key = get_api_key()
     if not key:
-        return []
+        print("[EARNINGS] No Finnhub API key - earnings feed unavailable")
+        return None
     import requests
     url = "https://finnhub.io/api/v1/calendar/earnings"
     params = {"from": from_date.isoformat(), "to": to_date.isoformat(), "token": key}
@@ -44,43 +50,51 @@ def fetch_earnings_finnhub(from_date: date, to_date: date) -> List[Dict]:
         except Exception as e:
             if attempt == 2:
                 print(f"[EARNINGS] Finnhub fetch failed after 3 attempts: {e}")
-                return []
+                return None
             time.sleep(1 + attempt)
-    return []
+    print("[EARNINGS] Finnhub rate-limited (429) on all 3 attempts")
+    return None
 
-def fetch_earnings_alpha(symbol: str) -> List[Dict]:
-    """Fallback via Alpha Vantage EARNINGS endpoint - returns next earnings date"""
+
+def fetch_earnings_calendar_alpha(symbols: List[str]) -> Dict[str, date]:
+    """Fallback via Alpha Vantage EARNINGS_CALENDAR (CSV, horizon=3month).
+
+    Unlike the EARNINGS endpoint (historical only), EARNINGS_CALENDAR
+    includes FUTURE report dates, so it can actually serve as the fallback
+    the old fetch_earnings_alpha() never could be. One API call for the
+    whole watchlist. Returns {symbol: next_report_date}.
+    """
     key = get_alpha_key()
     if not key:
-        return []
+        print("[EARNINGS] No Alpha Vantage key - calendar fallback unavailable")
+        return {}
     import requests
     url = "https://www.alphavantage.co/query"
-    params = {"function": "EARNINGS", "symbol": symbol, "apikey": key}
+    params = {"function": "EARNINGS_CALENDAR", "horizon": "3month", "apikey": key}
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
-        data = r.json()
-        # Alpha returns quarterlyEarnings with fiscalDateEnding and reportedDate
-        q = data.get("quarterlyEarnings", [])
-        upcoming = []
+        want = set(s.upper() for s in symbols)
         today = date.today()
-        for entry in q[:2]:  # check last few
-            # reportedDate may be future for upcoming? Alpha doesn't have future, but we can estimate
-            # Use fiscalDateEnding as proxy
-            d_str = entry.get("reportedDate") or entry.get("fiscalDateEnding")
-            if not d_str:
+        out: Dict[str, date] = {}
+        for row in csv.DictReader(io.StringIO(r.text)):
+            sym = (row.get("symbol") or "").upper()
+            if sym not in want:
                 continue
+            d_str = (row.get("reportDate") or "").strip()
             try:
                 d = datetime.fromisoformat(d_str).date()
-                # if within next 60 days and in future, treat as earnings risk
-                if 0 <= (d - today).days <= 90:
-                    upcoming.append({"symbol": symbol, "date": d_str})
             except Exception:
                 continue
-        return upcoming
+            if d < today:
+                continue
+            if sym not in out or d < out[sym]:
+                out[sym] = d
+        print(f"[EARNINGS] Alpha EARNINGS_CALENDAR fallback: {len(out)} watchlist dates")
+        return out
     except Exception as e:
-        print(f"[EARNINGS] Alpha fetch {symbol} failed: {e}")
-        return []
+        print(f"[EARNINGS] Alpha EARNINGS_CALENDAR fallback failed: {e}")
+        return {}
 
 def load_old_cache(symbols: List[str]) -> Dict[str, date]:
     """Load old cache even if stale, up to 48h"""
@@ -140,11 +154,29 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
 
     fetched = fetch_earnings_finnhub(today, future)
     earnings_map: Dict[str, date] = {}
-    
-    if not fetched and old_cache:
-        # Finnhub 503 - retain old cache
-        print(f"[EARNINGS] Finnhub returned empty/503, retaining old cache {len(old_cache)} symbols")
-        earnings_map = dict(old_cache)
+
+    if fetched is None:
+        # Finnhub FAILED (vs. genuinely empty calendar): retain stale cache,
+        # and if there is nothing usable left, fall back to Alpha's
+        # EARNINGS_CALENDAR (the one Alpha endpoint with future dates).
+        if old_cache:
+            print(f"[EARNINGS] Finnhub failed, retaining stale cache {len(old_cache)} symbols")
+            earnings_map = dict(old_cache)
+        elif cached:
+            print(f"[EARNINGS] Finnhub failed, retaining fresh cache {len(cached)} symbols")
+            earnings_map = dict(cached)
+        else:
+            earnings_map = fetch_earnings_calendar_alpha(symbols)
+        if not earnings_map:
+            print(f"[EARNINGS] WARNING: NO earnings data from Finnhub, cache, or Alpha - "
+                  f"earnings blocking is DEGRADED for this run ({len(symbols)} symbols)")
+    elif not fetched:
+        # Successful fetch, empty calendar (off-season). Keep stale entries.
+        if old_cache:
+            print(f"[EARNINGS] Finnhub empty, retaining old cache {len(old_cache)} symbols")
+            earnings_map = dict(old_cache)
+        else:
+            earnings_map = dict(cached)
     else:
         for entry in fetched:
             sym = entry.get("symbol", "").upper()
@@ -166,11 +198,6 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
             for sym, d in old_cache.items():
                 if sym not in earnings_map:
                     earnings_map[sym] = d
-
-    # If still empty and Alpha key available, try Alpha for critical symbols
-    if not earnings_map and get_alpha_key():
-        # Only try for symbols that are currently held to save API calls (5/min limit)
-        pass
 
     # Always write cache if we have data, otherwise keep old file
     if earnings_map:
