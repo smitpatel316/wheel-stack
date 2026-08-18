@@ -23,7 +23,7 @@ Logs to:
 - logs/market_context.json (from context_analyzer)
 """
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from core.utils import get_ny_timestamp
 import json
 import math
@@ -288,6 +288,15 @@ class StrategyLogger:
                 enriched["volatility_level"] = market_context.get("volatility_level")
                 enriched["technical_position"] = market_context.get("technical_position")
 
+            # JSON-safety: fields like dividend_ex arrive as datetime.date
+            # from the dividend calendar. Left as-is, json.dumps raises and
+            # the WHOLE journal entry is silently dropped (2026-08-18: the KO
+            # 59% profit-take close never reached wheel_trades.jsonl because
+            # KO's ex-div date 2026-09-15 was a date object).
+            for k, v in list(enriched.items()):
+                if isinstance(v, (datetime, date)):
+                    enriched[k] = v.isoformat()
+
             return enriched
         except Exception as e:
             # Return original with error flag
@@ -372,9 +381,11 @@ class StrategyLogger:
                 "commission": enriched.get("commission", 0),
             }
 
-            # Append to JSONL
+            # Append to JSONL (default=str: never drop a trade over one
+            # non-serializable field — a journaled trade with a stringified
+            # field beats a silently missing trade)
             with open(self.jsonl_file, "a") as f:
-                f.write(json.dumps(jsonl_entry) + "\n")
+                f.write(json.dumps(jsonl_entry, default=str) + "\n")
 
             # Also keep in main log for backward compat
             if self.log_entry.get("detailed_trades") is None:

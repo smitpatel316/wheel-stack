@@ -1,4 +1,5 @@
 """Stress tests: regression coverage for this week's real production bugs."""
+import json
 from datetime import date, timedelta
 
 from core.strategy import filter_underlying
@@ -198,6 +199,31 @@ class TestSgovFunding:
         assert any("AMD" in s for s in c.option_sells), "settled cash must fund the queued candidate"
         assert len(c.stock_sells) == 1, "no new SGOV sale once BP covers"
         assert not FundingQueue().load().entries, "filled candidate must leave the queue"
+
+    def test_r5_journal_survives_date_typed_dividend_ex(self, tmp_path):
+        # 2026-08-18: KO's 59% profit-take close was silently dropped from
+        # wheel_trades.jsonl — dividend_ex arrived as a datetime.date (KO
+        # ex-div 2026-09-15), json.dumps raised, and the whole entry landed
+        # in logging_errors instead. VZ's identical close the day before
+        # survived only because VZ had dividend_ex=None.
+        from datetime import date as _date
+        from app_logging.strategy_logger import StrategyLogger
+        sl = StrategyLogger(enabled=True,
+                            log_path=str(tmp_path / "strategy_log.json"),
+                            jsonl_path=str(tmp_path / "wheel_trades.jsonl"))
+        sl.log_detailed_trade(
+            {"underlying": "KO", "symbol": "KO260918P00082500", "strike": 82.5,
+             "dte": 31, "delta": -0.11, "bid_price": 0.28, "ask_price": 0.30,
+             "oi": None, "contract_type": "put", "underlying_price": 88.5,
+             "dividend_ex": _date(2026, 9, 15),
+             "profit_dollars_gross": 40.0, "profit_dollars_net": 40.0},
+            score=40.0, decision_type="close_profit_take_50")
+        lines = (tmp_path / "wheel_trades.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 1, "close entry must be journaled even with a date-typed dividend_ex"
+        entry = json.loads(lines[0])
+        assert entry["trade_type"] == "close_profit_take_50"
+        assert entry["contract"]["dividend_ex"] == "2026-09-15"
+        assert not sl.log_entry.get("logging_errors"), "no silent logging failures"
 
     def test_r4j_queue_replaces_stale_same_underlying(self):
         # 2026-08-18: three runs queued three DIFFERENT AAPL contracts
