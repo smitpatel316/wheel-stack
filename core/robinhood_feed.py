@@ -265,6 +265,102 @@ class RobinhoodFeed:
             lines.append(line)
         return lines
 
+    # ---- context cross-checks (added 2026-08-18 hardening) ----
+    def compare_earnings(self, finnhub_dates: dict[str, str], days: int = 14) -> list[dict]:
+        """Cross-check Finnhub earnings dates against Robinhood's calendar.
+
+        finnhub_dates: symbol -> 'YYYY-MM-DD' (the engine's earnings_map).
+        Logs kind='earnings' records: agree / rh_only (RH has a date the
+        engine doesn't — potential blind spot) / finnhub_only / date_mismatch.
+        """
+        data = self._call("get_earnings_calendar",
+                          {"days": days, "filter": "high_market_cap"})
+        rh_dates: dict[str, str] = {}
+        for r in (data or {}).get("results", []):
+            sym, rep = r.get("symbol"), r.get("report") or {}
+            if sym and rep.get("date"):
+                rh_dates[sym] = rep["date"]
+        lines = []
+        for sym in sorted(set(finnhub_dates) | set(rh_dates)):
+            fd, rd = finnhub_dates.get(sym), rh_dates.get(sym)
+            if fd and rd and fd == rd:
+                continue  # agree; don't spam the log
+            kind = ("date_mismatch" if fd and rd else
+                    "rh_only" if rd else "finnhub_only")
+            line = {"t": datetime.now(ET).isoformat(timespec="seconds"),
+                    "kind": "earnings", "symbol": sym, "check": kind,
+                    "finnhub_date": fd, "rh_date": rd}
+            self._append(line)
+            lines.append(line)
+            self.log.warning(f"[RH EARN] {sym} {kind}: finnhub={fd} rh={rd}")
+        self.log.info(f"[RH EARN] cross-checked {len(finnhub_dates) + len(rh_dates)} symbols, "
+                      f"{len(lines)} discrepancies")
+        return lines
+
+    def compare_fundamentals(self, alpha_report: dict[str, dict]) -> list[dict]:
+        """Cross-check Alpha Vantage fundamentals against Robinhood.
+
+        alpha_report: symbol -> fundamentals_report entry (uses data.PERatio /
+        data.PriceToBookRatio / data.MarketCapitalization when present).
+        Divergence threshold: 25% relative on any compared field.
+        """
+        symbols = list(alpha_report)
+        rh_data: dict[str, dict] = {}
+        for i in range(0, len(symbols), 10):  # RH caps at 10/call
+            data = self._call("get_equity_fundamentals",
+                              {"symbols": symbols[i:i + 10]})
+            for r in (data or {}).get("results", []):
+                if r.get("symbol"):
+                    rh_data[r["symbol"]] = r
+        lines = []
+        for sym, rep in alpha_report.items():
+            rh_row = rh_data.get(sym)
+            if not rh_row:
+                continue
+            av_data = rep.get("data") or {}
+            fields = {"pe": (av_data.get("PERatio"), rh_row.get("pe_ratio")),
+                      "pb": (av_data.get("PriceToBookRatio"), rh_row.get("pb_ratio")),
+                      "market_cap": (av_data.get("MarketCapitalization"), rh_row.get("market_cap"))}
+            for field, (a_v, r_v) in fields.items():
+                a_f, r_f = _f(a_v), _f(r_v)
+                if not a_f or not r_f:
+                    continue
+                diff_pct = (r_f - a_f) / a_f * 100.0
+                if abs(diff_pct) > 25:
+                    line = {"t": datetime.now(ET).isoformat(timespec="seconds"),
+                            "kind": "fundamentals", "symbol": sym, "field": field,
+                            "alpha": a_f, "rh": r_f, "diff_pct": round(diff_pct, 1)}
+                    self._append(line)
+                    lines.append(line)
+                    self.log.warning(f"[RH FUND] {sym} {field}: alpha={a_f} rh={r_f} ({diff_pct:+.0f}%)")
+        self.log.info(f"[RH FUND] cross-checked {len(rh_data)}/{len(symbols)} symbols, "
+                      f"{len(lines)} divergences")
+        return lines
+
+    def get_vix(self) -> float | None:
+        """VIX level from Robinhood indexes (2 calls: symbol -> id -> quote)."""
+        data = self._call("get_indexes", {"symbols": "VIX"})
+        idx = ((data or {}).get("indexes") or [{}])[0]
+        iid = idx.get("id")
+        if not iid:
+            return None
+        qdata = self._call("get_index_quotes", {"instrument_ids": [iid]})
+        quotes = (qdata or {}).get("quotes") or []
+        return _f(quotes[0].get("value")) if quotes else None
+
+    def compare_vix(self, engine_vix: float | None) -> dict | None:
+        rh_vix = self.get_vix()
+        if rh_vix is None or not engine_vix:
+            return None
+        diff = rh_vix - engine_vix
+        line = {"t": datetime.now(ET).isoformat(timespec="seconds"),
+                "kind": "vix", "engine": engine_vix, "rh": rh_vix,
+                "diff": round(diff, 2)}
+        self._append(line)
+        lvl = self.log.warning if abs(diff) > 1.5 else self.log.info
+        lvl(f"[RH VIX] engine={engine_vix} rh={rh_vix} (diff {diff:+.2f})")
+        return line
+
     def summary(self) -> str:
         s = self.stats
 

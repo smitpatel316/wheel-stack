@@ -655,6 +655,26 @@ def main():
             logger.info(rh_feed.summary())
         except Exception:
             pass
+        # 2026-08-18 hardening: cross-check context sources against Robinhood
+        # (earnings dates, fundamentals, VIX). Observation only; the engine's
+        # own sources remain authoritative for decisions.
+        try:
+            if earnings_map:
+                rh_feed.compare_earnings(
+                    {s: str(d) for s, d in earnings_map.items()},
+                    days=EARNINGS_CACHE_DAYS if 'EARNINGS_CACHE_DAYS' in dir() else 14)
+        except Exception as e:
+            logger.debug(f"[RH] earnings cross-check failed: {e}")
+        try:
+            if fundamentals_map:
+                rh_feed.compare_fundamentals(fundamentals_map)
+        except Exception as e:
+            logger.debug(f"[RH] fundamentals cross-check failed: {e}")
+        try:
+            eng_vix = getattr(market_ctx, "vix", None)
+            rh_feed.compare_vix(eng_vix)
+        except Exception as e:
+            logger.debug(f"[RH] vix cross-check failed: {e}")
 
     sync_sgov_real(client, logger)
 
