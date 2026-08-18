@@ -212,6 +212,56 @@ class TestSgovSweep:
         fn(c, logging.getLogger("t"), risk_override=0)
         assert all(o.type == "market" for o in c.submitted)
 
+    def test_sg7_pending_sell_suppresses_double_sell(self):
+        # 2026-08-18 midday run: a 416-share funding-queue pre-fund sale was
+        # pending, then the sweep tried to sell 541 MORE against only 196
+        # available -> Alpaca 403 "insufficient qty". Pending SGOV sells must
+        # count against the position when computing the sweep diff.
+        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000)
+        # liquid = 100 + 50250 = 50350; target = 49850 -> 496 shares; naive diff -4
+        from tests.stress.fakes import FakeOrder
+        o = FakeOrder("SGOV", 100, "sell", status="new")
+        c.orders[o.id] = o
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert not c.stock_sells, "pending sell already covers the diff; sweep must not sell again"
+        assert not c.stock_buys
+
+    def test_sg8_pending_sell_caps_additional_sell(self):
+        # Same root cause, other branch: target below (qty - pending) still
+        # sells, but only the remainder, never more than will remain.
+        fn, c = self._setup(cash=10_000, sgov_qty=500, stock_bp=1_000_000)
+        # queue reserve -> target 300 shares: liquid 60250 - 500 - 29600 = 30150 -> 300
+        import json, os
+        from datetime import date as _date, timedelta as _td
+        qpath = os.environ["WHEEL_FUNDING_QUEUE"]
+        tomorrow = (_date.today() + _td(days=1)).isoformat()
+        # reserve = need - opt_bp(14000) -> need 43600 for a 29600 reserve
+        with open(qpath, "w") as f:
+            json.dump({"entries": [{"symbol": "X260918P00436000", "underlying": "X",
+                                    "strike": 436.0, "expiration": "2026-09-18",
+                                    "need": 43_600, "score": 0.01,
+                                    "queued_at": "2026-08-18T00:00:00-04:00",
+                                    "valid_for": tomorrow}],
+                       "prefunded": 0.0}, f)
+        from tests.stress.fakes import FakeOrder
+        o = FakeOrder("SGOV", 100, "sell", status="new")
+        c.orders[o.id] = o
+        fn(c, logging.getLogger("t"), risk_override=0)
+        # naive diff = 300 - 500 = -200; pending 100 -> effective 400 -> sell exactly 100
+        assert c.stock_sells == [("SGOV", 100)]
+
+    def test_sg9_pending_sell_suppresses_buy_churn(self):
+        # Position is mid-flight down (pending sell); a target ABOVE the
+        # effective qty must NOT trigger a buy-back — that was the Aug 17
+        # sell+buy-back churn the funding queue exists to eliminate.
+        fn, c = self._setup(cash=10_000, sgov_qty=500, stock_bp=1_000_000)
+        # liquid 60250; target 59750 -> 594 shares; naive diff +94 (buy)
+        from tests.stress.fakes import FakeOrder
+        o = FakeOrder("SGOV", 100, "sell", status="new")
+        c.orders[o.id] = o
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert not c.stock_buys and not c.stock_sells
+
 
 class TestPaperDiscipline:
     def test_p1_is_paper_true(self):

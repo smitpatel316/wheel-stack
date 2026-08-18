@@ -199,6 +199,29 @@ class TestSgovFunding:
         assert len(c.stock_sells) == 1, "no new SGOV sale once BP covers"
         assert not FundingQueue().load().entries, "filled candidate must leave the queue"
 
+    def test_r4j_queue_replaces_stale_same_underlying(self):
+        # 2026-08-18: three runs queued three DIFFERENT AAPL contracts
+        # (fresh strike/expiry each run) — dedupe by OCC symbol let the
+        # queue hold $87k of AAPL need against ~$42k risk headroom, and the
+        # sweep reserved $131,962 (> account equity), draining SGOV to 0.
+        # Only one contract per underlying can ever fill, so a fresh entry
+        # must replace stale same-underlying ones.
+        q = FundingQueue(today=date.today())
+        q.add("AAPL261016P00285000", "AAPL", 285.0, "2026-10-16", 28_500, 0.030)
+        q.add("JNJ261016P00250000", "JNJ", 250.0, "2026-10-16", 25_000, 0.041)
+        assert q.add("AAPL260911P00295000", "AAPL", 295.0, "2026-09-11", 29_500, 0.052)
+        aapl = [e for e in q.entries if e["underlying"] == "AAPL"]
+        assert len(aapl) == 1 and aapl[0]["symbol"] == "AAPL260911P00295000"
+        assert q.pending_need() == 29_500 + 25_000
+        # exact same-symbol requeue is still a no-op
+        assert not q.add("AAPL260911P00295000", "AAPL", 295.0, "2026-09-11", 29_500, 0.052)
+        # prefunded dollars stay credited: already-sold cash is fungible
+        q2 = FundingQueue(today=date.today())
+        q2.prefunded = 81_000
+        q2.add("OLD1", "AAPL", 285.0, "2026-10-16", 28_500)
+        q2.add("NEW1", "AAPL", 295.0, "2026-09-11", 29_500)
+        assert q2.prefunded == 81_000, "replacement must not touch the prefunded ledger"
+
     def test_r4i_queue_entries_expire_after_one_trading_day(self):
         from datetime import date as _date, timedelta as _td
         today = _date.today()

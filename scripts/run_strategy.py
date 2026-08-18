@@ -121,10 +121,25 @@ def sync_sgov_real(client, logger, risk_override=None):
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
             open_orders = client.trade_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50))
-            sgov_open_qty = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('buy')>=0)
-            if sgov_open_qty > 0:
-                logger.info(f"[SGOV] Existing open BUY SGOV {sgov_open_qty} - skip duplicate")
+            sgov_open_buy = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('buy')>=0)
+            sgov_open_sell = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('sell')>=0)
+            if sgov_open_buy > 0:
+                logger.info(f"[SGOV] Existing open BUY SGOV {sgov_open_buy} - skip duplicate")
                 diff = 0
+            elif sgov_open_sell > 0:
+                # Pending SGOV sells (e.g. the funding-queue pre-fund sale) are
+                # already committed against this position. Without accounting
+                # for them the sweep double-sells and Alpaca rejects with
+                # "insufficient qty available" (2026-08-18 midday run: tried
+                # to sell 541 with only 196 available after a 416-share
+                # pre-fund). Never BUY while sells are pending either — the
+                # position is mid-flight down, buying here would be churn.
+                effective_qty = max(0, sgov_qty - sgov_open_sell)
+                new_diff = min(0, target_shares - effective_qty)
+                new_diff = -min(abs(new_diff), effective_qty)
+                if new_diff != diff:
+                    logger.info(f"[SGOV] {sgov_open_sell} shares already pending sale - adjusted sweep diff {diff} -> {new_diff}")
+                    diff = new_diff
         except Exception as e:
             logger.debug(f"Open order check failed: {e}")
 

@@ -110,9 +110,27 @@ class FundingQueue:
 
     def add(self, symbol: str, underlying: str, strike: float,
             expiration: str | None, need: float, score: float = 0.0) -> bool:
-        """Queue a candidate for next-day funding. Dedupes by OCC symbol."""
+        """Queue a candidate for next-day funding. Dedupes by OCC symbol.
+
+        Also REPLACES any older entry for the same underlying: each run
+        re-scans fresh and only ever sells ONE contract per underlying
+        (select_options is best-per-underlying), so keeping stale
+        strikes/expiries over-reserves cash and over-prefunds SGOV sales
+        (2026-08-18: three AAPL entries from three runs reserved ~$87k
+        against ~$42k of real risk headroom). The prefunded ledger is
+        dollars, not per-contract, so a replaced entry's already-sold cash
+        correctly stays credited to the queue.
+        """
         if any(e.get("symbol") == symbol for e in self.entries):
             return False
+        stale = [e for e in self.entries
+                 if e.get("underlying") == underlying and e.get("symbol") != symbol]
+        if stale:
+            for e in stale:
+                logger.info(f"[FUND QUEUE] replacing stale {e.get('symbol')} (${float(e.get('need', 0)):.0f}) with fresh {symbol} (${need:.0f}) for {underlying}")
+            stale_ids = {id(e) for e in stale}
+            self.entries = [e for e in self.entries if id(e) not in stale_ids]
+            self.dirty = True
         self.entries.append({
             "symbol": symbol,
             "underlying": underlying,
