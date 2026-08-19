@@ -155,6 +155,30 @@ class TestSgovFunding:
         assert not c.option_sells and not c.stock_sells
         assert len(FundingQueue().load().entries) == 1
 
+    def test_r4_queue_capped_at_risk_headroom(self):
+        # 2026-08-18 review: 6 entries totalling $134,750 queued against
+        # ~$41,650 of real risk headroom, draining SGOV to zero. Total queued
+        # need must never exceed remaining risk-cap headroom.
+        c = _client_with_puts([("AAA", 400, 10.0, -0.25), ("BBB", 400, 10.0, -0.25)],
+                              opt_bp=2_000)
+        c.add_sgov(600)
+        sell_puts(c, ["AAA", "BBB"], 50_000,  # only $50k risk headroom
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert not c.option_sells
+        q = FundingQueue().load()
+        assert len(q.entries) == 1, "second $40k candidate would push queued need past $50k headroom"
+        assert q.pending_need() <= 50_000
+
+    def test_r4_queue_cap_zero_headroom_nothing_queued(self):
+        c = _client_with_puts([("AAA", 400, 10.0, -0.25)], opt_bp=2_000)
+        c.add_sgov(600)
+        sell_puts(c, ["AAA"], 0,  # no risk headroom at all
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert not c.option_sells and not c.stock_sells
+        assert len(FundingQueue().load().entries) == 0
+
     def test_r4e_prefund_caps_at_holdings(self):
         c = self._rich_client(opt_bp=13_900, sgov_qty=100)
         q = FundingQueue().load()

@@ -103,6 +103,14 @@ CLOSER_LIVE_FEE_PER_CONTRACT = 0.65
 # Fidelity SPAXX sweep: all cash including put collateral in money market earning ~4.5%, still counts as collateral
 # RH Gold 4.3% auto. SGOV iShares 0-3M T-Bill 5.22% APY wrapper for Alpaca paper where stock BP limits.
 # Formula: cash + sgov_mv = total_liquid, target_ideal = total_liquid-500, max_affordable = stockBP-1000, target_real = min(ideal, affordable+sgov_mv)
+# MASTER SWITCH for the whole SGOV sweep (v2.5.3). True = Alpaca paper model:
+# sweep idle cash into SGOV, pre-fund next-day CSP queue with SGOV sales,
+# sync SGOV to Optionable, track sgov_history. False = Robinhood/Fidelity
+# model where the broker's own sweep pays interest on ALL cash including CSP
+# collateral: no sweep, no pre-funding, no SGOV anywhere. Everything SGOV
+# (sync_sgov_real, _prefund_queue_with_sgov, place_sgov_limit_order) hangs
+# off this flag so the whole mechanism can be deleted in one pass at the
+# Robinhood cutover. Set False BEFORE going live at Robinhood.
 SGOV_ENABLED = True
 SGOV_YIELD_APY = 0.0522  # 5.22% APY
 SGOV_YIELD_MONTHLY = 0.0043  # ~0.43% monthly div

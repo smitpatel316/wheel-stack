@@ -239,6 +239,12 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             if opt_bp is not None and opt_bp < need:
                 # Never sell SGOV for a same-day fill (T+1 makes it pointless
                 # churn); queue the candidate so tomorrow's settled cash funds it.
+                # Cap total queued need at remaining risk headroom: without this
+                # the queue over-reserved (3 AAPL contracts, $134k held back
+                # against ~$42k headroom on 2026-08-18) and drained the sweep.
+                if queue.pending_need() + need > max(buying_power, 0):
+                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} - skipped: queue ${queue.pending_need():.0f} + need would exceed remaining risk headroom ${buying_power:.0f}")
+                    continue
                 score_val = 0
                 try:
                     score_val = scores[put_options.index(p)]
