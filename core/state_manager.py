@@ -1,5 +1,8 @@
 from .utils import parse_option_symbol
 from alpaca.trading.enums import AssetClass
+import logging
+
+log = logging.getLogger(__name__)
 
 # Treasury proxies treated as cash collateral, excluded from wheel risk
 TREASURY_SYMBOLS = {"SGOV", "USFR", "BIL", "SHV", "TFLO"}
@@ -35,7 +38,8 @@ def calculate_exposures(positions):
                 _, otype, strike = parse_option_symbol(p.symbol)
                 if otype == 'P':
                     put_exp += 100 * float(strike) * abs(int(float(p.qty)))
-            except Exception:
+            except Exception as e:
+                log.warning("[SWALLOWED] exposure calc: unparseable option position %s skipped: %r", getattr(p, 'symbol', '?'), e)
                 pass
     return put_exp, long_stock, risk
 

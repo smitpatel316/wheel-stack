@@ -10,6 +10,7 @@ Behavior (from config/webhook_config.json + docs/deployment.md):
 """
 import hmac
 import json
+import logging
 import os
 import sys
 import time
@@ -17,6 +18,8 @@ import http.server
 import socketserver
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / "logs"
@@ -42,6 +45,7 @@ def load_secret() -> str:
     try:
         return json.loads(cfg.read_text())["secret"]
     except Exception as e:
+        log.warning("[SWALLOWED] webhook secret config read failed for %s: %r", cfg, e)
         print(f"FATAL: no FINNHUB_WEBHOOK_SECRET env and cannot read {cfg}: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -85,7 +89,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         error = (qs.get("error") or [""])[0]
         try:
             expected = json.loads(RH_PENDING.read_text()).get("state", "")
-        except Exception:
+        except Exception as e:
+            log.warning("[SWALLOWED] Robinhood pending-auth state read failed, rejecting callback: %r", e)
             expected = ""
         if not expected or not state or not hmac.compare_digest(expected, state):
             self._html(400, "Robinhood callback rejected",
@@ -124,7 +129,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
+        except Exception as e:
+            log.warning("[SWALLOWED] webhook POST body parse failed from %s: %r", self.client_address, e)
             self._json(400, {"error": "invalid JSON"})
             return
 
@@ -142,6 +148,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if EARNINGS_CACHE.exists():
                 EARNINGS_CACHE.unlink()
         except Exception as e:
+            log.warning("[SWALLOWED] webhook post-ack processing (event log/cache clear) failed: %r", e)
             print(f"post-ack processing error: {e}", flush=True)
 
     def log_message(self, fmt, *args):

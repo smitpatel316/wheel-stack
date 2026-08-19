@@ -20,12 +20,14 @@ def _alpaca_headers(client):
     # Try to get keys from client or env
     try:
         api_key = getattr(client, '_api_key', None) or client._api_key if hasattr(client, '_api_key') else os.getenv('ALPACA_API_KEY')
-    except:
+    except Exception as e:
+        logger.debug("[SWALLOWED] client/env API key lookup failed, importing from config.credentials: %r", e)
         from config.credentials import ALPACA_API_KEY
         api_key = ALPACA_API_KEY
     try:
         secret = getattr(client, '_secret_key', None) or getattr(client, '_api_secret', None) or os.getenv('ALPACA_SECRET_KEY')
-    except:
+    except Exception as e:
+        logger.debug("[SWALLOWED] client/env secret key lookup failed, importing from config.credentials: %r", e)
         from config.credentials import ALPACA_SECRET_KEY
         secret = ALPACA_SECRET_KEY
     if not api_key:
@@ -76,7 +78,8 @@ def _optionable_account_id() -> int:
             accounts = r.json().get('data') or []
             if accounts:
                 return accounts[0]['id']
-    except Exception:
+    except Exception as e:
+        logger.warning("[SWALLOWED] Optionable /api/accounts read failed, defaulting account_id=1: %r", e)
         pass
     return 1
 
@@ -85,7 +88,8 @@ def _existing_fund_txns() -> List[Dict]:
         r = requests.get(f"{OPTIONABLE_URL}/api/fund-transactions", timeout=TIMEOUT)
         if r.status_code == 200:
             return r.json().get('data') or []
-    except Exception:
+    except Exception as e:
+        logger.warning("[SWALLOWED] Optionable /api/fund-transactions read failed, dedupe set empty: %r", e)
         pass
     return []
 
@@ -97,7 +101,8 @@ def sync_dividends_and_interest(client):
             r = requests.get(f"{OPTIONABLE_URL}/api/health", timeout=3)
             if r.status_code != 200:
                 return
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] Optionable health check failed, skipping dividend/interest sync: %r", e)
             return
 
     account_id = _optionable_account_id()
@@ -125,7 +130,8 @@ def sync_dividends_and_interest(client):
                 continue
             try:
                 amount = float(net_amount)
-            except:
+            except Exception as e:
+                logger.debug("[SWALLOWED] unparseable net_amount %r for %s %s: %r", net_amount, act.get('activity_type',''), act.get('symbol',''), e)
                 continue
             if abs(amount) < 0.001:
                 continue

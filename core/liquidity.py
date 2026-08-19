@@ -4,9 +4,12 @@ Uses Alpha TIME_SERIES_DAILY for underlying volume history.
 """
 import os
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List
+
+logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "liquidity_cache.json"
@@ -16,7 +19,8 @@ def get_alpha_key():
     try:
         from config.credentials import ALPHA_VANTAGE_API_KEY
         return ALPHA_VANTAGE_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
 def fetch_daily_volume_alpha(symbol: str, days: int = 30) -> List[int]:
@@ -40,10 +44,12 @@ def fetch_daily_volume_alpha(symbol: str, days: int = 30) -> List[int]:
         for date_str in sorted(ts.keys())[-days:]:
             try:
                 vols.append(int(float(ts[date_str].get("5. volume") or 0)))
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] parsing daily volume bar %s for %s: %r", date_str, symbol, e)
                 pass
         return vols
     except Exception as e:
+        logger.warning("[SWALLOWED] Alpha TIME_SERIES_DAILY volume fetch failed for %s: %r", symbol, e)
         print(f"[LIQ] {symbol} vol fetch failed: {e}")
         return []
 
@@ -59,7 +65,8 @@ def evaluate_liquidity(symbol: str, current_volume: int = None, current_oi: int 
                 entry = raw["vol_history"][sym]
                 if time.time() - entry.get("_ts",0) < CACHE_TTL:
                     vols = entry.get("vols", [])
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] loading liquidity cache %s for %s, will refetch: %r", CACHE_FILE, sym, e)
             pass
     if not vols:
         vols = fetch_daily_volume_alpha(sym, days=30)
@@ -70,13 +77,15 @@ def evaluate_liquidity(symbol: str, current_volume: int = None, current_oi: int 
                 if CACHE_FILE.exists():
                     try:
                         raw = json.loads(CACHE_FILE.read_text())
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] reading liquidity cache %s before update, starting fresh: %r", CACHE_FILE, e)
                         raw = {}
                 if "vol_history" not in raw:
                     raw["vol_history"] = {}
                 raw["vol_history"][sym] = {"vols": vols, "_ts": time.time()}
                 CACHE_FILE.write_text(json.dumps(raw))
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] writing liquidity cache %s for %s: %r", CACHE_FILE, sym, e)
                 pass
         time.sleep(0.6)
 

@@ -52,7 +52,8 @@ def calc_risk_excluding_treasury(positions):
                     v = 100 * float(strike) * abs(int(float(p.qty)))
                     risk += v
                     put_exp += v
-            except Exception:
+            except Exception as e:
+                log.warning("[SWALLOWED] risk calc: unparseable option position %s skipped: %r", getattr(p, 'symbol', '?'), e)
                 pass
     return risk, put_exp, long_stock
 
@@ -61,7 +62,8 @@ def get_alpaca_sgov_qty(positions):
         if getattr(p, 'symbol', '') == 'SGOV':
             try:
                 return int(float(getattr(p, 'qty', 0)))
-            except:
+            except Exception as e:
+                log.debug("[SWALLOWED] SGOV qty parse failed, treating as 0: %r", e)
                 return 0
     return 0
 
@@ -111,12 +113,14 @@ def main():
             order = client.trade_client.submit_order(req)
             print(f"[ALPACA] Order {order.id} status {order.status}")
         except Exception as e:
+            log.warning("[SWALLOWED] SGOV buy order of %d shares failed: %r", diff, e)
             print(f"[ALPACA] Order failed: {e}")
     elif diff < 0:
         print(f"[ALPACA] Selling {abs(diff)} SGOV")
         try:
             client.market_sell_qty("SGOV", abs(diff))
         except Exception as e:
+            log.warning("[SWALLOWED] SGOV sell of %d shares failed: %r", abs(diff), e)
             print(f"[ALPACA] Sell failed: {e}")
     else:
         print("[ALPACA] SGOV at target, no order needed")
@@ -127,6 +131,7 @@ def main():
             sync_sgov_to_optionable(client)
             # After fill, stock API shows SGOV
         except Exception as e:
+            log.warning("[SWALLOWED] SGOV Optionable sync push failed: %r", e)
             print(f"Optionable sync failed: {e}")
 
     # Print final allocation
@@ -134,7 +139,8 @@ def main():
         import requests
         r = requests.get(f"{OPTIONABLE_URL}/api/stocks", timeout=5).json()
         print(f"[OPTIONABLE] Stocks: {[(x['ticker'], x['shares'], x['costBasis']) for x in r.get('data',[])]}")
-    except Exception:
+    except Exception as e:
+        log.debug("[SWALLOWED] final Optionable stocks readout failed (display only): %r", e)
         pass
 
 if __name__ == "__main__":

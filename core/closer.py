@@ -60,7 +60,8 @@ def evaluate_close_need(candidate: RollCandidate, config: Dict = None) -> CloseD
     try:
         from config.credentials import IS_PAPER
         comm_per_contract = 0 if IS_PAPER else 0.65
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] IS_PAPER import failed, assuming commission 0: %r", e)
         comm_per_contract = 0
 
     reasons = []
@@ -160,7 +161,8 @@ def evaluate_all_for_close(client, config: Dict = None) -> List[CloseDecision]:
             from core.utils import parse_option_symbol
             parse_option_symbol(p.symbol)
             option_positions.append(p)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] %s not an option position, skipped in close eval: %r", getattr(p, 'symbol', '?'), e)
             continue
 
     if not option_positions:
@@ -179,7 +181,8 @@ def evaluate_all_for_close(client, config: Dict = None) -> List[CloseDecision]:
             try:
                 u = _parse_occ(p.symbol)[0]
                 underlying_set.add(u)
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] OCC parse failed for %s in underlying-set build: %r", getattr(p, 'symbol', '?'), e)
                 pass
 
         underlying_trades = {}
@@ -223,7 +226,8 @@ def close_position(client, candidate: RollCandidate, logger_obj=None) -> bool:
         try:
             from config.credentials import IS_PAPER
             comm_per = 0 if IS_PAPER else 0.65
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] IS_PAPER import failed, assuming commission 0: %r", e)
             comm_per = 0
         qty_abs = abs(candidate.qty)
         gross = (candidate.avg_entry_price - candidate.current_price) * 100 * qty_abs if candidate.avg_entry_price and candidate.current_price else 0
@@ -254,7 +258,8 @@ def close_position(client, candidate: RollCandidate, logger_obj=None) -> bool:
             from core.optionable_sync import get_close_price_from_activities, sync_closed_trades
             # Let Alpaca settle then sync_closed will fetch actual fill; for now log intent
             log.info(f"[CLOSER] Will sync Optionable closePrice via Alpaca fill for {candidate.symbol} - avoids $0 phantom bug")
-        except Exception:
+        except Exception as e:
+            log.warning("[SWALLOWED] post-close Optionable sync intent failed for %s: %r", candidate.symbol, e)
             pass
 
         return True

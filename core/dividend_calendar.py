@@ -3,10 +3,13 @@ Alpha Vantage DIVIDENDS + OVERVIEW + Finnhub fallback
 """
 import os
 import json
+import logging
 import time
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Tuple
+
+logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "dividend_cache.json"
@@ -16,14 +19,16 @@ def get_alpha_key():
     try:
         from config.credentials import ALPHA_VANTAGE_API_KEY
         return ALPHA_VANTAGE_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
 def get_finnhub_key():
     try:
         from config.credentials import FINNHUB_API_KEY
         return FINNHUB_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading FINNHUB_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("FINNHUB_API_KEY") or ""
 
 def fetch_dividends_alpha(symbol: str) -> List[Dict]:
@@ -44,9 +49,11 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
                 # ExDividendDate is YYYY-MM-DD
                 datetime.fromisoformat(ex)
                 return [{"symbol": symbol.upper(), "exDate": ex, "amount": data.get("DividendPerShare"), "source": "OVERVIEW"}]
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] parsing OVERVIEW ex-dividend date %r for %s: %r", ex, symbol, e)
                 pass
-    except Exception:
+    except Exception as e:
+        logger.warning("[SWALLOWED] Alpha OVERVIEW dividend fetch failed for %s, falling back to DIVIDENDS endpoint: %r", symbol, e)
         pass
 
     # Fallback to DIVIDENDS endpoint
@@ -64,6 +71,7 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
                 result.append({"symbol": symbol.upper(), "exDate": ex, "amount": entry.get("amount"), "source": "DIVIDENDS"})
         return result
     except Exception as e:
+        logger.warning("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s: %r", symbol, e)
         # print(f"[DIVIDEND] Alpha {symbol} failed: {e}")
         return []
 
@@ -91,10 +99,12 @@ def fetch_dividends_finnhub(symbol: str, from_date: date, to_date: date) -> List
                     else:
                         ex_d = str(ex_ts)[:10]
                     result.append({"symbol": symbol.upper(), "exDate": ex_d, "amount": entry.get("amount"), "source": "Finnhub"})
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parsing Finnhub dividend entry for %s: %r", symbol, e)
                     pass
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning("[SWALLOWED] Finnhub dividend fetch failed for %s: %r", symbol, e)
         return []
 
 def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
@@ -113,12 +123,14 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                             d = datetime.fromisoformat(entry.get("exDate","")).date()
                             if (d - today).days >= -1:
                                 cache[sym] = d
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("[SWALLOWED] parsing cached dividend entry for %s: %r", sym, e)
                             pass
                 if cache:
                     print(f"[DIVIDEND] Cache hit {len(cache)} from {CACHE_FILE}")
                     return cache
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] loading dividend cache %s, rebuilding from APIs: %r", CACHE_FILE, e)
             pass
 
     dividend_map: Dict[str, date] = {}
@@ -131,7 +143,8 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                     if today <= ex <= future:
                         if sym.upper() not in dividend_map or ex < dividend_map[sym.upper()]:
                             dividend_map[sym.upper()] = ex
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parsing Alpha dividend ex-date for %s: %r", sym, e)
                     continue
         else:
             divs_f = fetch_dividends_finnhub(sym, today, future)
@@ -141,7 +154,8 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                     if today <= ex <= future:
                         if sym.upper() not in dividend_map or ex < dividend_map[sym.upper()]:
                             dividend_map[sym.upper()] = ex
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parsing Finnhub dividend ex-date for %s: %r", sym, e)
                     continue
         time.sleep(0.4)
 
@@ -157,7 +171,8 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
             "_to": future.isoformat(),
             "dividends": [{"symbol": k, "exDate": v.isoformat()} for k,v in dividend_map.items()]
         }, indent=2))
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] writing dividend cache %s: %r", CACHE_FILE, e)
         pass
 
     return dividend_map

@@ -1,7 +1,10 @@
 from config.params import DELTA_MIN, DELTA_MAX, YIELD_MIN, YIELD_MAX, OPEN_INTEREST_MIN, SCORE_MIN
 from config.params import SPREAD_MAX_ABS, SPREAD_MAX_PCT, SPREAD_NTM_MAX, MIN_PREMIUM, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE
 from config.params import DIVIDEND_BLOCK_DAYS, PE_MAX, MARKET_CAP_MIN
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 def filter_underlying(client, symbols, buying_power_limit, earnings_map=None, dividend_map=None, fundamentals_map=None, vol_map=None, liquidity_map=None, is_call=False):
     """
@@ -85,7 +88,8 @@ def _calc_yield(bid_price, strike, dte):
         if dte < 1:
             dte = 1
         return (bid_price / strike) * (365.0 / (dte + 1))
-    except Exception:
+    except Exception as e:
+        log.debug("[SWALLOWED] yield calc failed (bid=%r strike=%r dte=%r): %r", bid_price, strike, dte, e)
         return 0
 
 def _calc_spread_pct(bid, ask):
@@ -198,7 +202,8 @@ def score_options(options, fundamentals_map=None, vol_map=None, liquidity_map=No
                     liq_trend_score = lm.get("score_modifier", 1.0)
 
             scores.append((1 - d) * dte_term * prem_term * liq_boost * spread_penalty * fund_score * vol_score * liq_trend_score)
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] score calc failed for %s, scoring 0: %r", getattr(p, 'symbol', '?'), e)
             scores.append(0)
     return scores
 

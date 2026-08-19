@@ -6,11 +6,14 @@ No true IV history via API, so we proxy:
 """
 import os
 import json
+import logging
 import time
 import math
 from pathlib import Path
 from datetime import date, timedelta, datetime
 from typing import Dict, List, Tuple
+
+log = logging.getLogger(__name__)
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "volatility_cache.json"
@@ -20,7 +23,8 @@ def get_alpha_key():
     try:
         from config.credentials import ALPHA_VANTAGE_API_KEY
         return ALPHA_VANTAGE_API_KEY
-    except Exception:
+    except Exception as e:
+        log.debug("[SWALLOWED] config Alpha Vantage key import failed, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
 def fetch_daily_alpha(symbol: str, days: int = 300) -> List[float]:
@@ -43,11 +47,13 @@ def fetch_daily_alpha(symbol: str, days: int = 300) -> List[float]:
             try:
                 c = float(ts[d_str]["4. close"])
                 closes.append(c)
-            except Exception:
+            except Exception as e:
+                log.debug("[SWALLOWED] Alpha daily close parse failed for %s %s: %r", symbol, d_str, e)
                 continue
         closes.reverse()  # oldest first
         return closes
     except Exception as e:
+        log.debug("[SWALLOWED] Alpha daily fetch failed for %s: %r", symbol, e)
         print(f"[VOL] Alpha {symbol} daily failed: {e}")
         return []
 
@@ -100,7 +106,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 if all(s.upper() in data for s in symbols[:5]):
                     print(f"[VOL] Cache hit {len(data)}")
                     return data
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] volatility cache read failed, rebuilding: %r", e)
             pass
 
     vol_map: Dict[str, Dict] = {}
@@ -133,7 +140,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             "_timestamp": time.time(),
             "volatility": list(vol_map.values())
         }, indent=2))
-    except Exception:
+    except Exception as e:
+        log.debug("[SWALLOWED] volatility cache write failed: %r", e)
         pass
 
     return vol_map

@@ -55,7 +55,8 @@ def _parse_occ(occ_symbol: str) -> Optional[Tuple[str, str, str, float, str]]:
     day = int(yymmdd[4:6])
     try:
         exp_date = datetime.date(year, month, day).isoformat()
-    except ValueError:
+    except ValueError as e:
+        logger.debug("[SWALLOWED] expiry-date construction for OCC %s: %r", occ_symbol, e)
         return None
     opt_type = "Put" if pc == "P" else "Call"
     strike = int(strike_raw) / 1000.0
@@ -69,7 +70,8 @@ def get_default_account_id() -> int:
             accounts = data.get('data') or []
             if accounts:
                 return accounts[0]['id']
-    except Exception:
+    except Exception as e:
+        logger.warning("[SWALLOWED] fetch of Optionable accounts for default account id (falling back to 1): %r", e)
         pass
     return 1
 
@@ -96,7 +98,8 @@ def _commission_for_trade():
     try:
         from config.credentials import IS_PAPER
         return 0 if IS_PAPER else 0.65
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] import of config.credentials for commission (env fallback): %r", e)
         # fallback to env check
         return 0 if os.getenv("ALPACA_PAPER","true").lower() in ("true","1") else 0.65
 
@@ -144,7 +147,8 @@ def _fetch_buy_price(client, occ_symbol: str) -> Optional[float]:
                                 if price > 0:
                                     logger.debug(f"_fetch_buy_price {occ_symbol} found BUY @ ${price} order {getattr(o,'id','')}")
                                     return price
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("[SWALLOWED] parse of BUY fill price for %s: %r", occ_symbol, e)
                                 continue
                         # Also check legs for option orders?
                         legs = getattr(o, 'legs', None)
@@ -156,15 +160,18 @@ def _fetch_buy_price(client, occ_symbol: str) -> Optional[float]:
                                     if lp:
                                         try:
                                             return float(lp)
-                                        except Exception:
+                                        except Exception as e:
+                                            logger.debug("[SWALLOWED] parse of leg fill price for %s: %r", occ_symbol, e)
                                             pass
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] inspection of order while searching BUY fill for %s: %r", occ_symbol, e)
                     continue
 
             # Pagination
             try:
                 next_token = getattr(resp, 'next_page_token', None) if not isinstance(resp, list) else None
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] extraction of next_page_token while searching BUY fill for %s: %r", occ_symbol, e)
                 next_token = None
             if not next_token:
                 break
@@ -175,7 +182,8 @@ def _fetch_buy_price(client, occ_symbol: str) -> Optional[float]:
             # Alpaca get_account_activities with activity_type FILL
             acts = client.trade_client.get_account_activities(filter=None) if hasattr(client.trade_client, 'get_account_activities') else []
             # Actually use client's get_activities method wrapper if exists
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] optional activities-API probe for %s: %r", occ_symbol, e)  # swallow:intentional
             pass
 
     except Exception as e:
@@ -204,7 +212,8 @@ def get_close_price_from_activities(client, occ_symbol: str) -> Optional[float]:
                         p = getattr(act, 'price', None) or getattr(act, 'price_per_share', None)
                         if p:
                             return float(p)
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parse of activity record for %s: %r", occ_symbol, e)
                     continue
     except Exception as e:
         logger.debug(f"get_close_price_from_activities fallback failed {occ_symbol}: {e}")
@@ -276,7 +285,8 @@ def push_trade_to_optionable(
                     # Update if entry price differs significantly? For idempotency keep first
                     logger.info(f"Optionable: {underlying} {trade_type} ${strike} {exp_date} already open id={t['id']} (idempotent skip)")
                     return True
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] idempotent duplicate-check compare for %s %s %s: %r", underlying, trade_type, exp_date, e)
                 continue
 
         r = requests.post(f"{OPTIONABLE_URL}/api/trades", json=payload, timeout=TIMEOUT)
@@ -308,7 +318,8 @@ def sync_alpaca_equity_to_optionable(client):
                     if s.get('ticker') != 'SGOV':  # SGOV handled separately
                         # keep latest per ticker
                         existing[s.get('ticker')] = s
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] fetch of existing Optionable stocks for equity sync: %r", e)
             pass
 
         positions = client.get_positions()
@@ -322,7 +333,8 @@ def sync_alpaca_equity_to_optionable(client):
                 continue
             try:
                 qty = int(float(getattr(p, "qty", 0)))
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] parse of position qty for %s: %r", sym, e)
                 continue
             if qty <= 0:
                 continue
@@ -338,7 +350,8 @@ def sync_alpaca_equity_to_optionable(client):
             if ex:
                 try:
                     requests.delete(f"{OPTIONABLE_URL}/api/stocks/{ex['id']}", timeout=TIMEOUT)
-                except Exception:
+                except Exception as e:
+                    logger.warning("[SWALLOWED] delete of existing Optionable stock %s (id %s) before re-sync: %r", sym, ex.get('id'), e)
                     pass
             payload = {
                 "ticker": sym,
@@ -362,7 +375,8 @@ def sync_alpaca_equity_to_optionable(client):
                     # We keep it as closed by not deleting? Better to leave as closed handling outside
                     # For simplicity, if Alpaca no longer has it, assume sold - we don't auto-close to preserve history
                     pass
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] no-op sold-stock placeholder for %s: %r", ticker, e)  # swallow:intentional
                     pass
     except Exception as e:
         logger.warning(f"sync_alpaca_equity_to_optionable failed: {e}")
@@ -381,7 +395,8 @@ def sync_sgov_to_optionable(client):
                 try:
                     sgov_qty = int(float(getattr(p, "qty", 0)))
                     sgov_avg = float(getattr(p, "avg_entry_price", sgov_qty and 100.72))
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parse of SGOV position qty/avg: %r", e)
                     pass
         if sgov_qty <= 0:
             from alpaca.trading.requests import GetOrdersRequest
@@ -396,10 +411,12 @@ def sync_sgov_to_optionable(client):
                         if avg_pr:
                             try:
                                 sgov_avg = float(avg_pr)
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("[SWALLOWED] parse of SGOV order filled_avg_price: %r", e)
                                 pass
                         break
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] fetch of open SGOV orders from Alpaca: %r", e)
                 pass
             if sgov_qty <= 0:
                 return
@@ -412,7 +429,8 @@ def sync_sgov_to_optionable(client):
                 for s in (r.json().get('data') or []):
                     if s.get('ticker') == 'SGOV':
                         existing_sgov.append(s)
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] fetch of existing SGOV stock entries from Optionable: %r", e)
             pass
 
         # If exists with same qty/avg, skip
@@ -425,7 +443,8 @@ def sync_sgov_to_optionable(client):
             for es in existing_sgov:
                 try:
                     requests.delete(f"{OPTIONABLE_URL}/api/stocks/{es['id']}", timeout=TIMEOUT)
-                except Exception:
+                except Exception as e:
+                    logger.warning("[SWALLOWED] delete of stale SGOV stock entry (id %s) before re-sync: %r", es.get('id'), e)
                     pass
 
         payload = {
@@ -531,7 +550,8 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
                 if notes and 'OCC:' in notes:
                     try:
                         occ_guess = notes.split('OCC:')[1].split()[0].strip()
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] parse of OCC from trade notes for %s: %r", ticker, e)
                         occ_guess = None
 
                 # Lookup by OCC or by tuple string
@@ -583,7 +603,8 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
                                                 fetched = float(avg)
                                                 occ_guess = sym
                                                 break
-                                except Exception:
+                                except Exception as e:
+                                    logger.debug("[SWALLOWED] inspection of closed order in brute buy search for %s %s %s: %r", ticker, strike, exp, e)
                                     continue
                         except Exception as e:
                             logger.debug(f"brute buy search failed: {e}")
@@ -596,7 +617,8 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
                         try:
                             if exp and exp <= today:
                                 is_expired = True
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("[SWALLOWED] expiry-date comparison for %s exp %s: %r", ticker, exp, e)
                             is_expired = False
 
                         if ticker in alpaca_stock_tickers and ttype == 'CSP':
@@ -647,7 +669,8 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
                     # For assigned/expired close=0 => profit = entry*100*qty - commission
                     pl = (entry_price - close_price_val) * 100 * qty - commission if new_status != 'Assigned' else entry_price*100*qty - commission
                     logger.info(f"Optionable: {ticker} {ttype} ${strike} {exp} -> {new_status} closePrice ${close_price_val:.2f} entry ${entry_price:.2f} qty {qty} P/L ${pl:.2f} fees ${commission:.2f} (real vs phantom check)")
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] P/L computation for close log of %s %s: %r", ticker, ttype, e)
                     pass
 
                 # Update trade status via PUT
@@ -729,7 +752,8 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
                 try:
                     price_f = float(price)
                     qty_f = float(qty)
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] float parse of fill price/qty for %s: %r", sym, e)
                     continue
                 if sym not in occ_map:
                     occ_map[sym] = {"sells": [], "buys": [], "sell_total": 0.0, "buy_total": 0.0, "qty_sell": 0.0, "qty_buy": 0.0}
@@ -741,7 +765,8 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
                     occ_map[sym]["buys"].append((qty_f, price_f))
                     occ_map[sym]["buy_total"] += qty_f * price_f * 100
                     occ_map[sym]["qty_buy"] += qty_f
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] grouping of closed order into occ_map (sym %s): %r", getattr(o, 'symbol', None), e)
                 continue
 
         # Compute realized per OCC where buy qty >= sell qty (closed)
@@ -783,7 +808,8 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
                         cand = notes.split('OCC:')[1].split()[0].strip()
                         if cand in occ_map and occ_map[cand]["qty_buy"]>0:
                             occ_match = cand
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] parse of OCC candidate from trade notes: %r", e)
                         pass
                 if not occ_match:
                     # Try match via parsing all occ_map keys that match ticker/strike/exp
@@ -801,7 +827,8 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
                                 if occ_map[occ_sym]["qty_buy"]>0:
                                     occ_match = occ_sym
                                     break
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] match of trade %s to OCC via parsed occ_map: %r", tr.get('ticker'), e)
                         pass
 
                 if occ_match:

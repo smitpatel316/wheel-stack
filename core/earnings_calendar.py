@@ -2,10 +2,13 @@ import os
 import io
 import csv
 import json
+import logging
 import time
 from pathlib import Path
 from datetime import date, timedelta, datetime
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "earnings_cache.json"
@@ -16,14 +19,16 @@ def get_api_key():
     try:
         from config.credentials import FINNHUB_API_KEY
         return FINNHUB_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading FINNHUB_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("FINNHUB_API_KEY") or os.getenv("FINNHUB") or ""
 
 def get_alpha_key():
     try:
         from config.credentials import ALPHA_VANTAGE_API_KEY
         return ALPHA_VANTAGE_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
 def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict]]:
@@ -48,6 +53,7 @@ def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict
             data = r.json()
             return data.get("earningsCalendar", [])
         except Exception as e:
+            logger.warning("[SWALLOWED] Finnhub earnings calendar fetch failed (attempt %d/3): %r", attempt + 1, e)
             if attempt == 2:
                 print(f"[EARNINGS] Finnhub fetch failed after 3 attempts: {e}")
                 return None
@@ -84,7 +90,8 @@ def fetch_earnings_calendar_alpha(symbols: List[str]) -> Dict[str, date]:
             d_str = (row.get("reportDate") or "").strip()
             try:
                 d = datetime.fromisoformat(d_str).date()
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] parsing Alpha EARNINGS_CALENDAR reportDate %r for %s: %r", d_str, sym, e)
                 continue
             if d < today:
                 continue
@@ -93,6 +100,7 @@ def fetch_earnings_calendar_alpha(symbols: List[str]) -> Dict[str, date]:
         print(f"[EARNINGS] Alpha EARNINGS_CALENDAR fallback: {len(out)} watchlist dates")
         return out
     except Exception as e:
+        logger.warning("[SWALLOWED] Alpha EARNINGS_CALENDAR fallback fetch failed: %r", e)
         print(f"[EARNINGS] Alpha EARNINGS_CALENDAR fallback failed: {e}")
         return {}
 
@@ -117,11 +125,13 @@ def load_old_cache(symbols: List[str]) -> Dict[str, date]:
                     # only keep future dates
                     if (d - date.today()).days >= -2:
                         cached[sym] = d
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parsing stale-cache earnings date for %s: %r", sym, e)
                     pass
         if cached:
             print(f"[EARNINGS] Loaded stale cache {len(cached)} symbols age {age/3600:.1f}h")
     except Exception as e:
+        logger.debug("[SWALLOWED] loading stale earnings cache %s: %r", CACHE_FILE, e)
         print(f"[EARNINGS] Old cache load failed: {e}")
     return cached
 
@@ -147,9 +157,11 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                             d = datetime.fromisoformat(d_str).date()
                             if (d - today).days >= -1:
                                 cached[sym] = d
-                        except Exception:
+                        except Exception as e:
+                            logger.debug("[SWALLOWED] parsing fresh-cache earnings date for %s: %r", sym, e)
                             pass
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] loading earnings cache %s, will refetch: %r", CACHE_FILE, e)
             pass
 
     fetched = fetch_earnings_finnhub(today, future)
@@ -187,7 +199,8 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                 d = datetime.fromisoformat(d_str).date()
                 if sym not in earnings_map or d < earnings_map[sym]:
                     earnings_map[sym] = d
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] parsing Finnhub earnings date %r for %s: %r", d_str, sym, e)
                 continue
         # Merge old if not in new (conservative)
         if cache_age_ok:
@@ -210,6 +223,7 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                 "earningsCalendar": [{"symbol": k, "date": v.isoformat()} for k,v in earnings_map.items()]
             }, indent=2))
         except Exception as e:
+            logger.debug("[SWALLOWED] writing earnings cache %s: %r", CACHE_FILE, e)
             print(f"[EARNINGS] Cache write failed: {e}")
     else:
         # If we have old cache file, touch it to keep mtime?

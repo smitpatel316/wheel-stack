@@ -44,7 +44,8 @@ def main():
             drift = drift.get("inflated_vs_real", 0) or drift.get("value", 0) or 0
         try:
             drift_val = float(drift or 0)
-        except:
+        except Exception as e:
+            logger.warning("[SWALLOWED] drift value %r not float-parseable, treating as 0.0: %r", drift, e)
             drift_val = 0.0
 
         log_path = ROOT / "logs" / "reconcile.jsonl"
@@ -75,6 +76,7 @@ def main():
         print("=== Fallback reconcile ===")
         print(json.dumps(result, indent=2, default=str))
     except Exception as e2:
+        logger.warning("[SWALLOWED] fallback reconcile_optionable_vs_alpaca failed: %r", e2)
         print(f"Reconciliation failed: {e2}")
         import traceback
         traceback.print_exc()

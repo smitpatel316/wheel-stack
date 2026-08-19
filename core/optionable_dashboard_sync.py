@@ -52,20 +52,23 @@ class _TeeStream:
     def write(self, s):
         try:
             self._real.write(s)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] tee write to real stream failed: %r", e)
             pass
         self._buf += s
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             try:
                 self._on_line(line)
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] dashboard line parse failed for %r: %r", line[:120], e)
                 pass
 
     def flush(self):
         try:
             self._real.flush()
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] tee flush to real stream failed: %r", e)
             pass
 
     def __getattr__(self, name):  # isatty, fileno, etc.
@@ -124,7 +127,8 @@ class EngineDashboardPush:
             if self._orig_stdout is not None:
                 sys.stdout, sys.stderr = self._orig_stdout, self._orig_stderr
                 self._orig_stdout = self._orig_stderr = None
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] dashboard uninstall (restore stdout/stderr) failed: %r", e)
             pass
 
     # ---- parsing ----
@@ -183,7 +187,8 @@ class EngineDashboardPush:
             try:
                 exp = m.group(3)
                 detail = f"${m.group(2)}P {exp[5:7]}/{exp[8:10]}"
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] CSP detail date formatting failed, using strike only: %r", e)
                 detail = f"${m.group(2)}P"
             self.actions[m.group(1)] = ("sold", detail)
             return

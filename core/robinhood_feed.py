@@ -51,7 +51,8 @@ def _f(v) -> float | None:
             return None
         f = float(v)
         return f if f == f else None  # NaN guard
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("[SWALLOWED] Robinhood quote field %r not float-parseable: %r", v, e)
         return None
 
 

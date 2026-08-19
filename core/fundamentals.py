@@ -4,9 +4,12 @@ v2.5 adds true Debt/Equity via BALANCE_SHEET for robustness.
 """
 import os
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List
+
+logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 CACHE_FILE = LOG_DIR / "fundamentals_cache.json"
@@ -16,7 +19,8 @@ def get_alpha_key():
     try:
         from config.credentials import ALPHA_VANTAGE_API_KEY
         return ALPHA_VANTAGE_API_KEY
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
 def fetch_overview_alpha(symbol: str) -> Dict:
@@ -35,6 +39,7 @@ def fetch_overview_alpha(symbol: str) -> Dict:
             return {}
         return data
     except Exception as e:
+        logger.warning("[SWALLOWED] Alpha OVERVIEW fetch failed for %s: %r", symbol, e)
         print(f"[FUND] Overview {symbol} failed: {e}")
         return {}
 
@@ -67,9 +72,11 @@ def fetch_balance_sheet_alpha(symbol: str) -> Dict:
                 total_debt = float(latest.get("totalLiabilities") or 0)
             debt_eq = total_debt / equity if equity > 0 else 0
             return {"DebtEquity": debt_eq, "totalDebt": total_debt, "equity": equity, "raw": latest}
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] computing Debt/Equity from balance sheet for %s: %r", symbol, e)
             return {}
     except Exception as e:
+        logger.warning("[SWALLOWED] Alpha BALANCE_SHEET fetch failed for %s: %r", symbol, e)
         # print(f"[FUND] Balance {symbol} failed: {e}")
         return {}
 
@@ -87,7 +94,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 if cache:
                     print(f"[FUND] Cache hit {len(cache)}")
                     return cache
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] loading fundamentals cache %s, rebuilding from APIs: %r", CACHE_FILE, e)
             pass
 
     overview_map: Dict[str, Dict] = {}
@@ -132,7 +140,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             "_timestamp": time.time(),
             "fundamentals": list(overview_map.values())
         }, indent=2))
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] writing fundamentals cache %s: %r", CACHE_FILE, e)
         pass
 
     return overview_map
@@ -155,7 +164,8 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
             else:
                 score_mod *= 0.9
                 reasons.append(f"P/E {pe:.1f} > {pe_max} (high)")
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing PERatio for %s: %r", sym, e)
         pass
 
     try:
@@ -168,7 +178,8 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
             elif de_f > debt_eq_max:
                 score_mod *= 0.92
                 reasons.append(f"D/E {de_f:.2f} > {debt_eq_max} (leveraged)")
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing DebtEquity for %s: %r", sym, e)
         pass
 
     try:
@@ -176,14 +187,16 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
         if mc and mc < mkt_cap_min:
             score_mod *= 0.85
             reasons.append(f"Small cap ${mc/1e9:.1f}B < $1B")
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing MarketCapitalization for %s: %r", sym, e)
         pass
 
     try:
         dy = float(f.get("DividendYield") or 0) * 100
         if dy > 1.5:
             score_mod *= 1.05
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing DividendYield for %s: %r", sym, e)
         pass
 
     try:
@@ -191,14 +204,16 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
         if beta > 2.0:
             score_mod *= 0.9
             reasons.append(f"High Beta {beta:.1f}")
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing Beta for %s: %r", sym, e)
         pass
 
     # Growth screen v2.6: both revenue and earnings shrinking YoY -> block.
     # One shrinking -> small penalty. Missing data -> no opinion (never block).
     try:
         from config.params import GROWTH_BLOCK_ENABLED
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] importing GROWTH_BLOCK_ENABLED from config.params, defaulting to True: %r", e)
         GROWTH_BLOCK_ENABLED = True
     try:
         eg_raw = f.get("QuarterlyEarningsGrowthYOY")
@@ -216,7 +231,8 @@ def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float 
             elif eg < 0 or rg < 0:
                 score_mod *= 0.95
                 reasons.append(f"Growth mixed: revenue {rg:+.0%}, EPS {eg:+.0%}")
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] parsing quarterly growth metrics for %s: %r", sym, e)
         pass
 
     reason_str = "; ".join(reasons) if reasons else "OK"

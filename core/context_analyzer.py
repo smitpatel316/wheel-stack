@@ -101,7 +101,8 @@ def _realized_vol(prices: List[float]) -> Optional[float]:
         daily_vol = math.sqrt(var)
         annual_vol = daily_vol * math.sqrt(252) * 100  # % like VIX
         return annual_vol
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] realized vol calc failed (%d prices): %r", len(prices), e)
         return None
 
 
@@ -229,7 +230,8 @@ def get_vix_and_spy(client=None) -> Dict[str, Any]:
                         t = trades.get("SPY")
                         if t:
                             result["spy_price"] = float(getattr(t,'price',0) or (t.get('price') if isinstance(t, dict) else 0) or 0)
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] SPY latest-trade fallback failed: %r", e)
                     pass
             if result["vix"] is None:
                 try:
@@ -243,7 +245,8 @@ def get_vix_and_spy(client=None) -> Dict[str, Any]:
                                 result["vix_proxy"] = result["vix"]
                                 result["source"] = "vixy_latest_proxy_v22"
                                 result["vixy_price"] = price
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] VIXY latest-trade fallback failed: %r", e)
                     pass
         except Exception as e:
             logger.debug(f"Alpaca block failed {e}")
@@ -503,7 +506,8 @@ def save_context_log(ctx: MarketContext, path: str = "logs/market_context.json")
             data = json.loads(p.read_text())
             if not isinstance(data, list):
                 data = [data]
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] market context log %s unreadable, starting fresh list: %r", p, e)
             data = []
     else:
         data = []

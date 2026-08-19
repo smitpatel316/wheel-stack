@@ -204,7 +204,8 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
 
     try:
         from config.params import DELTA_MIN, DELTA_MAX, MIN_PREMIUM, YIELD_MIN, YIELD_MAX
-    except ImportError:
+    except ImportError as e:
+        logger.debug("[SWALLOWED] config.params import failed in find_roll_targets, using default delta/premium/yield bounds: %r", e)
         DELTA_MIN, DELTA_MAX = 0.18, 0.35
         MIN_PREMIUM, YIELD_MIN, YIELD_MAX = 0.20, 0.008, 0.50
 
@@ -257,7 +258,8 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
 
         try:
             y = (c.bid_price / c.strike * 365 / (c.dte+1)) if c.strike and c.dte else 0
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] yield calc failed for %s, using 0: %r", getattr(c, 'symbol', '?'), e)
             y = 0
         if not (YIELD_MIN <= y <= YIELD_MAX + 0.30):
             if decision.urgency != "critical":
@@ -269,7 +271,8 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
 
         try:
             exp_date = datetime.date.today() + datetime.timedelta(days=int(c.dte))
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] expiry date calc failed for %s, falling back to candidate expiration + 14d: %r", getattr(c, 'symbol', '?'), e)
             exp_date = candidate.expiration + datetime.timedelta(days=14)
 
         premium_rate = c.bid_price / c.strike if c.strike else 0
@@ -305,7 +308,8 @@ def build_roll_candidate_from_position(pos, snapshot=None, underlying_trade=None
         exp = None
         try:
             _, exp, _, _ = _parse_occ(pos.symbol)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] OCC parse failed for %s, using expiration fallback today+18d: %r", getattr(pos, 'symbol', '?'), e)
             exp = datetime.date.today() + datetime.timedelta(days=18)
 
         dte = (exp - datetime.date.today()).days
@@ -327,7 +331,8 @@ def build_roll_candidate_from_position(pos, snapshot=None, underlying_trade=None
                     ask = getattr(snapshot.latest_quote, 'ask_price', None)
                     if not current_price and bid:
                         current_price = (bid + (ask or bid)) / 2
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] snapshot greeks/quote parse failed for %s: %r", getattr(pos, 'symbol', '?'), e)
                 pass
 
         if current_price == 0 and ask:
@@ -379,7 +384,8 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
         try:
             from config.credentials import IS_PAPER
             comm_per = 0 if IS_PAPER else 0.65
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] IS_PAPER import failed, assuming commission 0: %r", e)
             comm_per = 0
 
         qty_abs = abs(candidate.qty)
@@ -415,7 +421,8 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
             if filled_order:
                 st = str(getattr(filled_order, 'status', '')).lower()
                 log.info(f"[ROLL] Close order {close_id} status {st} after 2s")
-        except Exception:
+        except Exception as e:
+            log.warning("[SWALLOWED] close-order status check failed for %s (order %s): %r", candidate.symbol, close_id, e)
             pass
 
         log.info(f"[ROLL] Opening {target.symbol} sell {candidate.qty} net credit ${target.net_credit:.2f} gross ${target.net_credit*100*qty_abs:.2f} after-fees ${net_credit_after_fees:.2f} {target.reasoning}")
@@ -455,7 +462,8 @@ def evaluate_all_positions(client, config: Dict = None) -> List[RollDecision]:
             from core.utils import parse_option_symbol
             parse_option_symbol(p.symbol)
             option_positions.append(p)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] %s not an option position, skipped in roll eval: %r", getattr(p, 'symbol', '?'), e)
             continue
 
     if option_positions:
@@ -472,7 +480,8 @@ def evaluate_all_positions(client, config: Dict = None) -> List[RollDecision]:
                 try:
                     u = _parse_occ(p.symbol)[0]
                     underlying_set.add(u)
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] OCC parse failed for %s in underlying-set build: %r", getattr(p, 'symbol', '?'), e)
                     pass
 
             underlying_trades = {}

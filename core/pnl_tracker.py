@@ -33,7 +33,8 @@ def _commission_per_contract() -> float:
     try:
         from config.credentials import IS_PAPER
         return 0.0 if IS_PAPER else 0.65
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] IS_PAPER import failed, deriving commission from ALPACA_PAPER env: %r", e)
         return 0.0 if os.getenv("ALPACA_PAPER","true").lower() in ("true","1") else 0.65
 
 def _parse_occ_simple(occ: str):
@@ -103,7 +104,8 @@ def _compute_realized_from_orders(client) -> Tuple[float, float, List[Dict]]:
                 occ_data[sym]["buy_qty"] += qty_f
                 occ_data[sym]["buy_mv"] += mv
                 occ_data[sym]["buys"].append({"qty":qty_f, "price":price_f, "mv":mv})
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] skipping unparseable closed order %r in realized P/L: %r", getattr(o, 'symbol', None), e)
             continue
 
     realized = 0.0
@@ -164,7 +166,8 @@ def _compute_unrealized(client) -> Tuple[float, List[Dict]]:
                     net = gross - comm_per*qty_abs
                     unrealized += net
                     breakdown.append({"symbol": getattr(p,"symbol",""), "qty":qty, "avg":avg_entry, "cur":cur, "unreal":net, "gross":gross})
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] skipping position %r in unrealized P/L: %r", getattr(p, "symbol", None), e)
                 continue
         return unrealized, breakdown
     except Exception as e:
@@ -180,7 +183,8 @@ def get_optionable_pnl(account_id: Optional[int]=None) -> Dict:
                 # reuse helper from optionable_sync if available
                 from core.optionable_sync import get_default_account_id
                 account_id = get_default_account_id()
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] get_default_account_id failed, falling back to account_id=1: %r", e)
                 account_id = 1
         r = requests.get(f"{OPTIONABLE_URL}/api/trades?accountId={account_id}", timeout=TIMEOUT)
         if r.status_code != 200:
@@ -205,7 +209,8 @@ def get_optionable_pnl(account_id: Optional[int]=None) -> Dict:
                     # Optionable unrealized? If it has current price? We estimate using closePrice=0? Actually open trades have close 0
                     # We'll not compute unrealized from Optionable, use 0
                     pass
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] skipping unparseable Optionable trade row in P/L compare: %r", e)
                 continue
         result["total"] = result["realized"] + result["unrealized"]
         return result
@@ -253,7 +258,8 @@ def get_real_pnl(client) -> Dict:
     try:
         from config.params import PNL_DISCREPANCY_THRESHOLD
         thresh = PNL_DISCREPANCY_THRESHOLD
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] PNL_DISCREPANCY_THRESHOLD import failed, using default 50.0: %r", e)
         thresh = 50.0
 
     if abs(discrepancy) > thresh:
@@ -272,7 +278,8 @@ def get_real_pnl(client) -> Dict:
     try:
         from config.credentials import IS_PAPER
         is_paper = bool(IS_PAPER)
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] IS_PAPER import failed, defaulting is_paper=True: %r", e)
         pass
 
     return {
@@ -322,6 +329,7 @@ def reconcile_optionable_vs_alpaca(client, optionable_url=None):
             'summary': summary,
         }
     except Exception as e:
+        logger.warning("[SWALLOWED] reconcile_optionable_vs_alpaca failed: %r", e)
         return {'error': str(e), 'realized': 0}
 
 def get_real_pnl_from_orders(client):
@@ -330,6 +338,7 @@ def get_real_pnl_from_orders(client):
 def get_unrealized_pnl(client):
     try:
         return _compute_unrealized(client)
-    except:
+    except Exception as e:
+        logger.warning("[SWALLOWED] get_unrealized_pnl failed: %r", e)
         return {'unrealized': 0}
 

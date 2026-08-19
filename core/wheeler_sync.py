@@ -145,7 +145,8 @@ def sync_alpaca_equity_positions_to_wheeler(client):
                 continue
             try:
                 qty = int(float(getattr(p, "qty", 0)))
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] Wheeler equity sync: qty parse failed for %s: %r", sym, e)
                 continue
             if qty <= 0:
                 continue
@@ -160,7 +161,8 @@ def sync_alpaca_equity_positions_to_wheeler(client):
                         f"sg docker -c \"docker exec wheeler sqlite3 /app/data/wheeler.db \\\"DELETE FROM long_positions WHERE symbol='{sym}';\\\"\"",
                         shell=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                     )
-                except Exception:
+                except Exception as e:
+                    logger.warning("[SWALLOWED] Wheeler idempotent DELETE for %s failed, POST may double-count: %r", sym, e)
                     pass
                 payload = {
                     "symbol": sym,

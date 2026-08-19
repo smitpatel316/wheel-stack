@@ -12,9 +12,11 @@ if _os.getenv("ENABLE_WHEELER_SYNC", "").lower() in ("1", "true", "yes"):
         def _push_wheeler(sym, premium, contracts=1):
             try:
                 push_option_to_wheeler(sym, premium, contracts)
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] wheeler sync push failed for %s: %r", sym, e)
                 pass
-    except ImportError:
+    except ImportError as e:
+        logging.getLogger(f"strategy.{__name__}").debug("[SWALLOWED] wheeler_sync import unavailable, using no-op push: %r", e)
         def _push_wheeler(sym, premium, contracts=1):
             pass
 else:
@@ -62,7 +64,8 @@ def _prefund_queue_with_sgov(client, deficit, risk_bp, queue):
             latest = client.get_stock_latest_trade("SGOV")
             trade = latest.get("SGOV") if isinstance(latest, dict) else None
             price = float(getattr(trade, 'price', 0) or (trade.get('p') if isinstance(trade, dict) else 0) or 100.5)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] SGOV latest-trade price fetch failed, using default 100.5: %r", e)
             price = 100.5
         shares = min(sgov_qty, max(1, _math.ceil((amount + 150) / price)))
         logger.info(f"[SGOV FUND] Pre-funding next-day queue: selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${amount:.0f} deficit (settles T+1)")
@@ -87,7 +90,8 @@ def calc_mid_price(contract_obj) -> float:
         elif ask > 0:
             return ask
         return 0.0
-    except Exception:
+    except Exception as e:
+        logger.debug("[SWALLOWED] mid-price calc failed for %s, returning 0.0: %r", getattr(contract_obj, 'symbol', '?'), e)
         return 0.0
 
 def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_limit=True, wait_seconds=8):
@@ -140,7 +144,8 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
                     logger.debug(f"fill check failed {symbol}: {fe} - cancel + market to be safe")
                     try:
                         client.cancel_order(order_id)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("[SWALLOWED] cancel_order failed for %s (order %s) after fill-check error: %r", symbol, order_id, e)
                         pass
             client.market_sell(symbol)
             return {"type": "market_fallback_unfilled", "price": bid, "mid": mid, "limit_attempt": limit_price, "improvement": 0.0}
@@ -183,10 +188,12 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             if snap and 'latestQuote' in snap:
                 try:
                     c.ask_price = float(snap['latestQuote'].get('ap', 0) or snap['latestQuote'].get('askPrice', 0))
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] ask price parse failed for %s, leaving default: %r", getattr(c, 'symbol', '?'), e)
                     pass
             put_options.append(c)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] put contract build failed for %s, skipping: %r", getattr(contract, 'symbol', '?'), e)
             continue
 
     put_options = filter_options(put_options, vol_map=vol_map)
@@ -248,7 +255,8 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 score_val = 0
                 try:
                     score_val = scores[put_options.index(p)]
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] score lookup failed for %s, using 0: %r", getattr(p, 'symbol', '?'), e)
                     pass
                 if queue.add(p.symbol, p.underlying, p.strike, p.expiration, need, score_val):
                     newly_queued += 1
@@ -263,7 +271,8 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
             try:
                 idx = put_options.index(p)
                 score_val = scores[idx]
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] score lookup failed for %s, using 0: %r", getattr(p, 'symbol', '?'), e)
                 pass
             mid = calc_mid_price(p)
             logger.info(f"Selling put: {p.symbol} strike ${p.strike} bid ${p.bid_price} mid ${mid:.2f} delta {p.delta} DTE {p.dte} score {score_val:.3f}")
@@ -344,10 +353,12 @@ def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, mar
             if snap and 'latestQuote' in snap:
                 try:
                     c.ask_price = float(snap['latestQuote'].get('ap', 0) or 0)
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] ask price parse failed for %s, leaving default: %r", getattr(c, 'symbol', '?'), e)
                     pass
             contracts.append(c)
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] call contract build failed for %s, skipping: %r", getattr(co, 'symbol', '?'), e)
             continue
 
     call_options = filter_options(contracts, purchase_price)

@@ -8,6 +8,9 @@ Handles both snapshot representations defensively:
 - alpaca-py model objects (latest_quote {ask_price, bid_price}, greeks {delta})
 """
 from datetime import date, datetime
+import logging
+
+log = logging.getLogger(__name__)
 
 
 def _get(obj, *keys):
@@ -30,7 +33,8 @@ def _to_float(v):
         if v is None:
             return None
         return float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        log.debug("[SWALLOWED] contract field %r not float-parseable: %r", v, e)
         return None
 
 
@@ -56,7 +60,8 @@ class Contract:
         oi_raw = _get(contract, "open_interest", "oi")
         try:
             oi = int(oi_raw) if oi_raw is not None else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            log.debug("[SWALLOWED] open_interest %r not int-parseable for %s: %r", oi_raw, symbol, e)
             oi = None
 
         # DTE from expiration (date or ISO string)
@@ -65,7 +70,8 @@ class Contract:
         if isinstance(exp, str):
             try:
                 exp = datetime.strptime(exp[:10], "%Y-%m-%d").date()
-            except ValueError:
+            except ValueError as e:
+                log.debug("[SWALLOWED] expiration %r not ISO-parseable for %s: %r", exp, symbol, e)
                 exp = None
         if isinstance(exp, datetime):
             exp = exp.date()

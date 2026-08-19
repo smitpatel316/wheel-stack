@@ -26,7 +26,10 @@ from pathlib import Path
 from datetime import datetime, date
 from core.utils import get_ny_timestamp
 import json
+import logging
 import math
+
+log = logging.getLogger(__name__)
 
 # Paper's 27 factors expanded v2.5 - now includes dividends, fundamentals, iv_rank, execution, assignment defense
 # v2.5.4 30 factors + P/L tracking
@@ -160,6 +163,7 @@ class StrategyLogger:
             self.log_entry["bn_edges"] = ctx_dict.get("bn_edges", [])
             self.log_entry["bn_reasoning"] = ctx_dict.get("bn_reasoning", "")
         except Exception as e:
+            log.debug("[SWALLOWED] set_market_context attach failed: %r", e)
             self.log_entry["market_context_error"] = str(e)
 
     def log_roll_decisions(self, roll_decisions: list):
@@ -188,6 +192,7 @@ class StrategyLogger:
                     serializable.append(d)
             self.log_entry["roll_decisions"] = serializable
         except Exception as e:
+            log.debug("[SWALLOWED] log_roll_decisions serialization failed: %r", e)
             self.log_entry["roll_decisions_error"] = str(e)
 
     def log_close_decisions(self, close_decisions: list):
@@ -222,6 +227,7 @@ class StrategyLogger:
                     serializable.append(d)
             self.log_entry["close_decisions"] = serializable
         except Exception as e:
+            log.debug("[SWALLOWED] log_close_decisions serialization failed: %r", e)
             self.log_entry["close_decisions_error"] = str(e)
 
     def _enrich_contract_dict(self, contract_dict: dict, market_context: dict = None) -> dict:
@@ -299,6 +305,7 @@ class StrategyLogger:
 
             return enriched
         except Exception as e:
+            log.debug("[SWALLOWED] _enrich_contract_dict failed for %s: %r", contract_dict.get("symbol"), e)
             # Return original with error flag
             d = dict(contract_dict)
             d["enrich_error"] = str(e)
@@ -393,6 +400,7 @@ class StrategyLogger:
             self.log_entry["detailed_trades"].append(jsonl_entry)
 
         except Exception as e:
+            log.warning("[SWALLOWED] log_detailed_trade journal write failed for %s: %r", contract_dict.get("symbol"), e)
             # Don't crash strategy on logging failure
             if self.log_entry.get("logging_errors") is None:
                 self.log_entry["logging_errors"] = []
@@ -427,6 +435,7 @@ class StrategyLogger:
                     f"vs optionable ${pnl_summary.get('optionable_realized',0):.2f} - check closePrice=0 bug"
                 )
         except Exception as e:
+            log.debug("[SWALLOWED] set_pnl_summary attach failed: %r", e)
             self.log_entry["pnl_summary_error"] = str(e)
 
     def set_sgov_yield(self, sgov_info: dict):
@@ -436,7 +445,8 @@ class StrategyLogger:
         try:
             self.log_entry["sgov_yield"] = sgov_info
             self.log_entry["sgov_shares"] = sgov_info.get("shares",0) if isinstance(sgov_info, dict) else 0
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] set_sgov_yield attach failed: %r", e)
             pass
 
     def save(self):
@@ -454,7 +464,8 @@ class StrategyLogger:
             self.log_entry["rh_mcp_enabled"] = RH_MCP_ENABLED
             self.log_entry["factor_count"] = 30
             self.log_entry["factors_version"] = "v2.5.4-30factors-real-vs-optionable"
-        except Exception:
+        except Exception as e:
+            log.debug("[SWALLOWED] save() params snapshot import failed (ImportError fallback): %r", e)
             self.log_entry["factor_count"] = 30
 
         # Load existing log data if file exists
@@ -464,7 +475,8 @@ class StrategyLogger:
                     data = json.load(f)
                     if not isinstance(data, list):
                         raise ValueError("Log file does not contain a list.")
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    log.warning("[SWALLOWED] strategy log file %s unreadable JSON, starting fresh list: %r", self.log_file, e)
                     data = []
         else:
             data = []

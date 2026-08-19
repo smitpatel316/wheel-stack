@@ -37,7 +37,8 @@ def sync_sgov_real(client, logger, risk_override=None):
                 put_exp, long_stock = pe, ls
                 if risk_override == 0:
                     risk = r
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] calculate_exposures failed in SGOV sweep, zeroing put/long exposure (risk_override=%s): %r", risk_override, e)
                 put_exp, long_stock = 0, 0
         else:
             put_exp, long_stock, risk = calculate_exposures(positions)
@@ -51,7 +52,8 @@ def sync_sgov_real(client, logger, risk_override=None):
                     sgov_qty = int(float(getattr(p, 'qty', 0)))
                     sgov_price = float(getattr(p, 'current_price', sgov_price) or sgov_price)
                     sgov_mv = sgov_qty * sgov_price
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] SGOV position field parse failed, keeping qty/price defaults: %r", e)
                     pass
         try:
             latest = client.get_stock_latest_trade("SGOV")
@@ -228,7 +230,8 @@ def main():
                     try:
                         from datetime import date
                         earnings_map[sym] = datetime.fromisoformat(info["earnings_date"]).date()
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] earnings date parse failed for %s (%r): %r", sym, info.get("earnings_date"), e)
                         pass
             blocked = [(s,i["earnings_date"],i["reason"]) for s,i in earnings_report.items() if i["blocked"]]
             if blocked:
@@ -294,7 +297,8 @@ def main():
                     de = r.get("data",{}).get("DebtEquity")
                     if de and float(de) > 0.7:
                         high_de.append(f"{s} D/E {float(de):.2f}")
-                except Exception:
+                except Exception as e:
+                    logger.debug("[SWALLOWED] fundamentals DebtEquity parse failed for %s: %r", s, e)
                     pass
             if high_de:
                 logger.info(f"[FUND] High leverage D/E>0.7: {high_de[:5]}")
@@ -427,7 +431,8 @@ def main():
             if eq_path.exists():
                 try:
                     hist = _json.loads(eq_path.read_text())
-                except Exception:
+                except Exception as e:
+                    logger.warning("[SWALLOWED] equity history load failed, restarting history from empty: %r", e)
                     hist = []
             hist.append({"t": _dt.now().astimezone().isoformat(), "equity": float(acct.equity)})
             eq_path.write_text(_json.dumps(hist[-5000:]))
@@ -441,14 +446,16 @@ def main():
                             sgov_qty = float(getattr(_p, "qty", 0))
                             try:
                                 sgov_avg = float(getattr(_p, "avg_entry_price"))
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("[SWALLOWED] SGOV avg_entry_price parse failed, using None: %r", e)
                                 sgov_avg = None
                     sg_path = Path(__file__).resolve().parent.parent / "logs" / "sgov_history.json"
                     sh = []
                     if sg_path.exists():
                         try:
                             sh = _json.loads(sg_path.read_text())
-                        except Exception:
+                        except Exception as e:
+                            logger.warning("[SWALLOWED] SGOV history load failed, restarting history from empty: %r", e)
                             sh = []
                     sh.append({"t": _dt.now().astimezone().isoformat(), "shares": sgov_qty, "avg": sgov_avg})
                     sg_path.write_text(_json.dumps(sh[-5000:]))
@@ -466,7 +473,8 @@ def main():
             try:
                 # Try via trade_client if method exists
                 pass
-            except Exception:
+            except Exception as e:
+                logger.debug("[SWALLOWED] trade_client activities probe failed: %r", e)
                 pass
             # Log any long stock that indicates assignment
             long_non_treasury = [s for s, st in states.items() if st["type"]=="long_shares" and s not in TREASURY_SYMBOLS]
@@ -566,7 +574,8 @@ def main():
                                 continue
                             try:
                                 avail.append(Contract.from_contract_snapshot(co, sn))
-                            except Exception:
+                            except Exception as e:
+                                logger.debug("[SWALLOWED] roll-target snapshot build failed for %s, skipping contract: %r", getattr(co, 'symbol', '?'), e)
                                 continue
                         avail_filtered = filter_options(avail, vol_map=vol_map)
                         targets = find_roll_targets(decision.candidate, avail_filtered, decision, config={
@@ -651,10 +660,12 @@ def main():
                         sgov_mv_check = float(getattr(pp,'market_value',0) or getattr(pp,'current_price',0) or 0) * float(getattr(pp,'qty',0)) if hasattr(pp,'market_value') else 0
                         if sgov_mv_check==0:
                             sgov_mv_check = float(getattr(pp,'qty',0))*100.42
-            except Exception:
+            except Exception as e:
+                logger.warning("[SWALLOWED] SGOV market-value recheck failed, total_liq may understate: %r", e)
                 pass
             total_liq_check = cash_check + sgov_mv_check
-        except Exception:
+        except Exception as e:
+            logger.warning("[SWALLOWED] total-liquidity account check failed, treating total_liq/cash as 0: %r", e)
             total_liq_check = 0
             cash_check = 0
 
@@ -669,7 +680,8 @@ def main():
     if rh_feed is not None:
         try:
             logger.info(rh_feed.summary())
-        except Exception:
+        except Exception as e:
+            logger.debug("[SWALLOWED] RH feed summary log failed: %r", e)
             pass
         # 2026-08-18 hardening: cross-check context sources against Robinhood
         # (earnings dates, fundamentals, VIX). Observation only; the engine's

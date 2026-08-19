@@ -95,7 +95,8 @@ class FundingQueue:
     def _live(self, e: dict) -> bool:
         try:
             return date.fromisoformat(str(e.get("valid_for", ""))) >= self.today
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("[SWALLOWED] funding queue entry %s has bad valid_for %r, treating as expired: %r", e.get("symbol"), e.get("valid_for"), exc)
             return False
 
     def expire(self) -> list[dict]:
