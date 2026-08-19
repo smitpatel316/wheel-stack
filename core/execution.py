@@ -295,7 +295,7 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 push_trade_to_optionable(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1, delta=getattr(p, 'delta', None))
             except Exception as e:
                 logger.warning(f"Optionable sync failed for {p.symbol}: {e}")
-            queue.mark_filled(p.symbol)
+            queue.mark_filled(p.symbol, underlying=getattr(p, 'underlying', None))
 
             if strat_logger:
                 d = p.to_dict()

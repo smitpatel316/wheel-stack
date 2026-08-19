@@ -75,7 +75,36 @@ class FundingQueue:
             self.entries = []
             self.prefunded = 0.0
             self.broken = True
+            return self
+        self.dedupe_by_underlying()
         return self
+
+    def dedupe_by_underlying(self) -> list[dict]:
+        """Keep only the newest entry per underlying (last one wins).
+
+        add() replaces stale same-underlying entries, but only when a NEW
+        candidate for that underlying is queued. State written before that
+        fix (or left by runs whose fresh candidates were all blocked by the
+        headroom cap) can hold several entries for one underlying — each run
+        re-scans fresh and only ever sells ONE contract per underlying, so
+        every older entry is dead weight that over-reserves cash against the
+        SGOV sweep (2026-08-19: three AAPL entries = $87k of a $134k queue
+        reserved against $650 of real risk headroom, sweep pinned at 0).
+        Mirrors add(): the prefunded dollar ledger is untouched because any
+        SGOV already sold stays credited to the queue.
+        """
+        newest_idx: dict[str, int] = {}
+        for i, e in enumerate(self.entries):
+            newest_idx[e.get("underlying", "")] = i
+        kept, dropped = [], []
+        for i, e in enumerate(self.entries):
+            (kept if newest_idx[e.get("underlying", "")] == i else dropped).append(e)
+        if dropped:
+            for e in dropped:
+                logger.info(f"[FUND QUEUE] dedupe: dropped stale {e.get('symbol')} (${float(e.get('need', 0)):.0f}) for {e.get('underlying')} - newer entry kept")
+            self.entries = kept
+            self.dirty = True
+        return dropped
 
     def save(self) -> None:
         if not self.dirty:
@@ -145,15 +174,33 @@ class FundingQueue:
         self.dirty = True
         return True
 
-    def mark_filled(self, symbol: str) -> bool:
-        """Candidate sold (funded from settled cash) -> drop from queue."""
-        hit = [e for e in self.entries if e.get("symbol") == symbol]
+    def mark_filled(self, symbol: str, underlying: str | None = None) -> bool:
+        """Candidate sold (funded from settled cash) -> drop from queue.
+
+        When `underlying` is given, also drops any OTHER queued entries for
+        the same underlying: a fill means we now hold a CSP on that name, so
+        reserving cash for a second contract on it is moot. Fresh scans pick
+        strike/expiry each run, so exact-symbol matching alone almost never
+        fires (2026-08-19: AAPL260911P00300000 filled while queued
+        AAPL260911P00295000 + two stale AAPL entries kept reserving $87k).
+        Each dropped entry's prefunded dollars are consumed by the fill,
+        same as an exact match.
+        """
+        hit = [e for e in self.entries
+               if e.get("symbol") == symbol
+               or (underlying and e.get("underlying") == underlying)]
         if not hit:
             return False
-        self.prefunded = max(0.0, self.prefunded - float(hit[0].get("need", 0) or 0))
-        self.entries = [e for e in self.entries if e.get("symbol") != symbol]
+        for e in hit:
+            self.prefunded = max(0.0, self.prefunded - float(e.get("need", 0) or 0))
+        dropped_extra = [e for e in hit if e.get("symbol") != symbol]
+        self.entries = [e for e in self.entries
+                        if not (e.get("symbol") == symbol
+                                or (underlying and e.get("underlying") == underlying))]
         self.dirty = True
         logger.info(f"[FUND QUEUE] {symbol} funded and filled - removed from queue")
+        for e in dropped_extra:
+            logger.info(f"[FUND QUEUE] also dropped {e.get('symbol')} (${float(e.get('need', 0)):.0f}) - same underlying {underlying} now has an open CSP")
         return True
 
     # ---- funding math ----

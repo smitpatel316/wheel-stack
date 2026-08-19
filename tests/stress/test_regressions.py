@@ -333,6 +333,52 @@ class TestFundingQueueMath:
         assert q.prefunded == 20_000 and len(q.entries) == 1
         assert q.mark_filled("NOPE") is False
 
+    def test_load_dedupes_legacy_same_underlying_entries(self):
+        # 2026-08-19: state written before the add()-time replacement fix
+        # held 3 AAPL entries ($87k of a $134k queue) with no fresh AAPL add
+        # to trigger cleanup — reserve pinned the SGOV sweep at 0 all day.
+        from core.funding_queue import queue_path
+        entries = [
+            {"symbol": "AAPL261016P00285000", "underlying": "AAPL", "strike": 285.0,
+             "expiration": "2026-10-16", "need": 28_500, "score": 0.03,
+             "queued_at": "2026-08-18T14:08:06+00:00", "valid_for": "2099-01-01"},
+            {"symbol": "AAPL260911P00295000", "underlying": "AAPL", "strike": 295.0,
+             "expiration": "2026-09-11", "need": 29_500, "score": 0.05,
+             "queued_at": "2026-08-18T19:07:59+00:00", "valid_for": "2099-01-01"},
+            {"symbol": "KO260918P00085000", "underlying": "KO", "strike": 85.0,
+             "expiration": "2026-09-18", "need": 8_500, "score": 0.03,
+             "queued_at": "2026-08-18T19:07:59+00:00", "valid_for": "2099-01-01"},
+        ]
+        queue_path().write_text(json.dumps({"entries": entries, "prefunded": 81_465.75}))
+        q = FundingQueue().load()
+        aapl = [e for e in q.entries if e["underlying"] == "AAPL"]
+        assert len(q.entries) == 2, "load() must drop stale same-underlying duplicates"
+        assert len(aapl) == 1 and aapl[0]["symbol"] == "AAPL260911P00295000", "newest entry wins"
+        assert q.prefunded == 81_465.75, "dedupe must not touch the prefunded ledger (mirrors add())"
+        assert q.dirty, "dedupe must persist on next save()"
+
+    def test_mark_filled_drops_same_underlying_entries(self):
+        # 2026-08-19: AAPL260911P00300000 filled while AAPL260911P00295000 sat
+        # queued — exact-symbol match missed, $29.5k kept reserving for a name
+        # that now has an open CSP.
+        q = FundingQueue()
+        # legacy pre-fix state: two AAPL entries coexist (add() now prevents this)
+        q.entries = [
+            {"symbol": "AAPL260911P00295000", "underlying": "AAPL", "need": 29_500},
+            {"symbol": "AAPL261016P00285000", "underlying": "AAPL", "need": 28_500},
+            {"symbol": "KO260918P00085000", "underlying": "KO", "need": 8_500},
+        ]
+        q.record_prefund(66_500)
+        assert q.mark_filled("AAPL260911P00300000", underlying="AAPL") is True
+        assert [e["underlying"] for e in q.entries] == ["KO"]
+        assert q.prefunded == 8_500, "dropped AAPL entries' prefunded dollars are consumed by the fill"
+
+    def test_mark_filled_without_underlying_keeps_exact_match_only(self):
+        q = FundingQueue()
+        q.add("A", "AAPL", 100.0, "2026-09-18", 10_000)
+        assert q.mark_filled("OTHER") is False
+        assert len(q.entries) == 1
+
     def test_next_trading_day_skips_weekend(self):
         from core.funding_queue import next_trading_day
         from datetime import date as _d

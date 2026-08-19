@@ -210,6 +210,15 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
         MIN_PREMIUM, YIELD_MIN, YIELD_MAX = 0.20, 0.008, 0.50
 
     targets = []
+    # Drop-reason funnel: logged when zero targets survive, so a recurring
+    # "No roll targets" line says WHY (2026-08-19 review: F/VZ/KO/NEE/INTC
+    # all hit it with no visibility into which filter bit).
+    drops: Dict[str, int] = {}
+    same_underlying = 0
+
+    def _drop(reason: str) -> None:
+        drops[reason] = drops.get(reason, 0) + 1
+
     close_cost = candidate.current_price
     if close_cost is None:
         logger.warning(f"[ROLLER] No current price for {candidate.symbol} - cannot compute roll net credit, skipping")
@@ -218,42 +227,55 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
     for c in available_contracts:
         if c.underlying != candidate.underlying:
             continue
+        same_underlying += 1
         if c.dte is None or c.dte < exp_min_cfg:
+            _drop(f"dte<{exp_min_cfg}min")
             continue
         if c.dte < (candidate.dte or 0) + dte_extension_min:
+            _drop(f"dte_ext<{dte_extension_min}d")
             continue
         if c.dte > (candidate.dte or 0) + dte_extension_max + 30:
             if decision.urgency != "critical":
+                _drop("dte_ext_too_far")
                 continue
         if candidate.is_put:
             if decision.roll_type == "defensive" and decision.urgency != "critical":
                 if c.strike > candidate.strike + 0.01:
+                    _drop("strike_not_lower")
                     continue
             elif decision.roll_type == "assignment_avoidance" and decision.urgency == "critical":
                 # For critical, allow same strike or lower, but not much higher
                 if c.strike > candidate.strike * 1.02:
+                    _drop("strike_too_high")
                     continue
         else:
             if decision.roll_type == "defensive":
                 if c.strike < candidate.strike - 0.01:
+                    _drop("strike_not_higher")
                     continue
 
         if c.delta is None:
+            _drop("no_delta")
             continue
         if not (DELTA_MIN <= abs(c.delta) <= DELTA_MAX + 0.15):  # slightly wider for critical
             if decision.urgency != "critical":
+                _drop("delta_band")
                 continue
         if not c.bid_price or c.bid_price < MIN_PREMIUM:
             if decision.urgency != "critical" or c.bid_price < 0.10:
+                _drop("bid_below_min_premium")
                 continue
         if not c.ask_price:
+            _drop("no_ask")
             continue
         abs_spread = (c.ask_price - c.bid_price) if c.bid_price and c.ask_price else 999
         sp_pct = _spread_pct(c.bid_price, c.ask_price)
         if abs_spread > spread_max_abs and sp_pct > spread_max_pct:
             if decision.urgency != "critical":
+                _drop("spread_too_wide")
                 continue
         if abs_spread > 0.40:  # hard cap higher for critical
+            _drop("spread_hard_cap")
             continue
 
         try:
@@ -263,10 +285,12 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
             y = 0
         if not (YIELD_MIN <= y <= YIELD_MAX + 0.30):
             if decision.urgency != "critical":
+                _drop("yield_band")
                 continue
 
         net = c.bid_price - close_cost
         if net < min_credit:
+            _drop(f"net_credit<{min_credit:.2f}")
             continue
 
         try:
@@ -298,6 +322,11 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
         targets.sort(key=lambda x: (-x.net_credit, -x.premium_rate))
     else:
         targets.sort(key=lambda x: -x.net_credit)
+
+    if not targets:
+        funnel = ", ".join(f"{k}={v}" for k, v in sorted(drops.items(), key=lambda kv: -kv[1])) or "none"
+        logger.info(f"[ROLLER] {candidate.symbol}: 0 roll targets from {same_underlying} {candidate.underlying} contracts "
+                    f"(close_cost ${close_cost:.2f}, min_credit ${min_credit:.2f}) - drops: {funnel}")
 
     return targets[:5]
 
