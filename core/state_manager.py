@@ -1,11 +1,59 @@
+import json
+import os
+
 from .utils import parse_option_symbol
 from alpaca.trading.enums import AssetClass
 import logging
 
 log = logging.getLogger(__name__)
 
+# v2.6: max defensive rolls per position lineage ("BAC:P"), then let it ride to
+# assignment/expiry. Community consensus: a position rolled 1-2 times without
+# improvement should stop rolling (rolls out of hope compound losses).
+MAX_ROLLS_PER_LINEAGE = 2
+ROLL_COUNTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "roll_counts.json")
+
+
+def load_roll_counts(path=ROLL_COUNTS_PATH):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        # swallow:intentional - first run before any roll has happened
+        log.debug("[SWALLOWED] no roll-count file at %s yet (first run)", path)
+        return {}
+    except Exception as e:
+        log.warning("roll counts unreadable at %s, starting fresh: %r", path, e)
+        return {}
+
+
+def save_roll_counts(counts, path=ROLL_COUNTS_PATH):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(counts, f, indent=1)
+    os.replace(tmp, path)
+
+
+def prune_roll_counts(counts, states):
+    """Drop lineages whose position is gone (expired, closed, or assigned).
+
+    A short-put lineage ends at assignment (state flips to long_shares); the
+    covered-call phase is a separate "SYM:C" lineage with its own count.
+    """
+    alive = set()
+    for sym, st in states.items():
+        t = st.get("type")
+        if t == "short_put":
+            alive.add(f"{sym}:P")
+        elif t == "short_call":
+            alive.add(f"{sym}:C")
+    return {k: v for k, v in counts.items() if k in alive}
+
+
 # Treasury proxies treated as cash collateral, excluded from wheel risk
 TREASURY_SYMBOLS = {"SGOV", "USFR", "BIL", "SHV", "TFLO"}
+
 
 def calculate_risk(positions):
     risk = 0

@@ -112,9 +112,19 @@ class TestRollerDecisions:
         d2 = evaluate_roll_need(_cand(strike=50.0, und=60.0, delta=-0.65))
         assert d2.urgency == "high"
 
-    def test_ro7_loss_over_100pct_rolls(self):
-        d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=60.0))
+    def test_ro7_loss_over_100pct_near_money_rolls(self):
+        # v2.6: loss>100% only triggers when actually near the money
+        d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=50.4, delta=-0.45))
         assert d.should_roll and d.roll_type == "defensive"
+
+    def test_ro7b_loss_over_100pct_far_otm_no_roll(self):
+        # v2.6: premium doubled but 20% OTM with delta -0.25 -> hold, don't realize early
+        d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=60.0, delta=-0.25))
+        assert not d.should_roll
+
+    def test_ro7c_loss_over_100pct_no_delta_far_otm_no_roll(self):
+        d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=60.0, delta=None))
+        assert not d.should_roll
 
     def test_ro12_zero_underlying_price_no_crash(self):
         d = evaluate_roll_need(_cand(strike=50.0, und=0.0, dte=20))

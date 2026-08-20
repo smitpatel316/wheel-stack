@@ -141,11 +141,20 @@ def evaluate_roll_need(candidate: RollCandidate, config: Dict = None) -> RollDec
             urgency = "high"
 
     if candidate.loss_pct > loss_threshold:
-        reasons.append(f"Loss {candidate.loss_pct:.0%} > {loss_threshold:.0%} underwater -> defensive roll")
-        should_roll = True
-        roll_type = "defensive"
-        if urgency == "low":
-            urgency = "medium"
+        # v2.6: premium-loss % alone is a noise trigger on cheap puts — it fires
+        # while the stock is still comfortably OTM and tempted us to realize losses
+        # early (BAC 2026-08-20). Wheel-community consensus + backtests: roll on
+        # proximity (strike touch / delta), not premium %. Loss only counts when
+        # the position is actually near the money (OTM<1% or |delta|>=0.40).
+        near_money = otm_pct < 0.01 or (candidate.delta is not None and abs(candidate.delta) >= 0.40)
+        if near_money:
+            reasons.append(f"Loss {candidate.loss_pct:.0%} > {loss_threshold:.0%} underwater and near the money (OTM {otm_pct:.1%}, delta {candidate.delta}) -> defensive roll")
+            should_roll = True
+            roll_type = "defensive"
+            if urgency == "low":
+                urgency = "medium"
+        else:
+            reasons.append(f"Loss {candidate.loss_pct:.0%} > {loss_threshold:.0%} but still {otm_pct:.1%} OTM (delta {candidate.delta}) - premium-loss alone is not a roll trigger (v2.6)")
 
     if candidate.profit_pct >= profit_threshold and candidate.dte is not None and candidate.dte > 7:
         reasons.append(f"Profit {candidate.profit_pct:.0%} >= {profit_threshold:.0%} early take/roll offensive")

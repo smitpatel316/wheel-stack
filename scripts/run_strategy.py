@@ -1,7 +1,7 @@
 from pathlib import Path
 from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
-from core.state_manager import update_state, calculate_risk, calculate_exposures, TREASURY_SYMBOLS
+from core.state_manager import update_state, calculate_risk, calculate_exposures, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
 from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED
 from app_logging.strategy_logger import StrategyLogger
@@ -557,10 +557,21 @@ def main():
                     logger.info(f"  - {d.candidate.symbol} {d.roll_type} urgency {d.urgency} OTM {d.decision_factors.get('otm_pct',0):.1%} ITM {d.candidate.itm_pct:.1%} DTE {d.candidate.dte}: {d.reasons}")
                 if not is_market_open:
                     logger.info(f"[ROLLER] Market closed - deferring {len(need_roll)} rolls to next open session")
-                for decision in (need_roll[:2] if is_market_open else []):
+                # v2.6: cap defensive rolls per position lineage, then let it ride
+                roll_counts = prune_roll_counts(load_roll_counts(), states)
+                capped = []
+                for d in need_roll:
+                    lineage = f"{d.candidate.underlying}:{'P' if d.candidate.is_put else 'C'}"
+                    n = roll_counts.get(lineage, 0)
+                    if n >= MAX_ROLLS_PER_LINEAGE:
+                        logger.info(f"[ROLLER] {d.candidate.symbol} already rolled {n}x (max {MAX_ROLLS_PER_LINEAGE}) - letting it ride to expiry/assignment (v2.6 cap)")
+                    else:
+                        capped.append(d)
+                for decision in (capped[:2] if is_market_open else []):
                     try:
                         underlying = decision.candidate.underlying
                         opt_type = 'put' if decision.candidate.is_put else 'call'
+                        lineage = f"{underlying}:{'P' if decision.candidate.is_put else 'C'}"
                         contracts_raw = client.get_options_contracts([underlying], opt_type)
                         snaps = {}
                         occs = [c.symbol for c in contracts_raw]
@@ -590,6 +601,9 @@ def main():
                             best = targets[0]
                             logger.info(f"[ROLLER] Rolling {decision.candidate.symbol} -> {best.symbol} net ${best.net_credit:.2f} {best.reasoning} {'(DEBIT AVOID ASSIGNMENT)' if best.net_credit<0 else ''}")
                             success = roll_position(client, decision.candidate, best, logger_obj=logger)
+                            if success:
+                                roll_counts[lineage] = roll_counts.get(lineage, 0) + 1
+                                save_roll_counts(roll_counts)
                             if success and strat_logger.enabled:
                                 strat_logger.log_detailed_trade(
                                     {"underlying": underlying, "symbol": best.symbol, "strike": best.strike, "dte": best.dte, "delta": best.delta, "bid_price": best.bid_price, "ask_price": best.ask_price, "oi": best.oi, "contract_type": opt_type, "iv_rank": vol_map.get(underlying,{}).get("iv_rank") if vol_map else None},
