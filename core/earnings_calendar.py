@@ -53,9 +53,11 @@ def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict
             data = r.json()
             return data.get("earningsCalendar", [])
         except Exception as e:
-            logger.warning("[SWALLOWED] Finnhub earnings calendar fetch failed (attempt %d/3): %r", attempt + 1, e)
+            # Never log %r of the exception here - HTTPError includes the request URL with the Finnhub API token
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            logger.warning("[SWALLOWED] Finnhub earnings calendar fetch failed (attempt %d/3, HTTP %s): %s", attempt + 1, status, type(e).__name__)
             if attempt == 2:
-                print(f"[EARNINGS] Finnhub fetch failed after 3 attempts: {e}")
+                print(f"[EARNINGS] Finnhub fetch failed after 3 attempts: {type(e).__name__} HTTP {status}")
                 return None
             time.sleep(1 + attempt)
     print("[EARNINGS] Finnhub rate-limited (429) on all 3 attempts")

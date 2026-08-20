@@ -149,7 +149,7 @@ def sync_sgov_real(client, logger, risk_override=None):
             logger.info(f"[SGOV SWEEP] Buying {diff} SGOV @ ${sgov_price:.2f} to earn interest on ${diff*sgov_price:.0f} collateral (Fidelity SPAXX sweep)")
             place_sgov_limit_order(client, "buy", diff, logger_obj=logger)
         elif diff < 0:
-            logger.info(f"[SGOV] Selling {abs(diff)} SGOV at market (need cash for assignment)")
+            logger.info(f"[SGOV] Selling {abs(diff)} SGOV at market (target {target_shares} < held {sgov_qty}: rebalance to sweep target, frees ${abs(diff)*sgov_price:.0f} cash)")
             place_sgov_limit_order(client, "sell", abs(diff), logger_obj=logger)
         else:
             logger.info(f"[SGOV] At sweep target {target_shares} shares earning ${monthly_interest_real:.2f}/mo - perfect SPAXX wrapper")
@@ -657,9 +657,15 @@ def main():
                 poss = client.get_positions()
                 for pp in poss:
                     if getattr(pp, 'symbol','')=='SGOV':
-                        sgov_mv_check = float(getattr(pp,'market_value',0) or getattr(pp,'current_price',0) or 0) * float(getattr(pp,'qty',0)) if hasattr(pp,'market_value') else 0
-                        if sgov_mv_check==0:
-                            sgov_mv_check = float(getattr(pp,'qty',0))*100.42
+                        qty = float(getattr(pp,'qty',0) or 0)
+                        # Alpaca market_value is already qty*price - do NOT multiply by qty again
+                        # (2026-08-20 midday: 492 sh showed total_liq $24.4M instead of ~$102k)
+                        mv = float(getattr(pp,'market_value',0) or 0)
+                        if mv > 0:
+                            sgov_mv_check = mv
+                        else:
+                            px = float(getattr(pp,'current_price',0) or 0)
+                            sgov_mv_check = px * qty if px > 0 else qty * 100.42
             except Exception as e:
                 logger.warning("[SWALLOWED] SGOV market-value recheck failed, total_liq may understate: %r", e)
                 pass

@@ -75,7 +75,12 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
         # print(f"[DIVIDEND] Alpha {symbol} failed: {e}")
         return []
 
+_FINNHUB_DIV_DISABLED = False  # set on first 403: free plan lacks /stock/dividend, don't retry all run
+
 def fetch_dividends_finnhub(symbol: str, from_date: date, to_date: date) -> List[Dict]:
+    global _FINNHUB_DIV_DISABLED
+    if _FINNHUB_DIV_DISABLED:
+        return []
     key = get_finnhub_key()
     if not key:
         return []
@@ -104,7 +109,13 @@ def fetch_dividends_finnhub(symbol: str, from_date: date, to_date: date) -> List
                     pass
         return result
     except Exception as e:
-        logger.warning("[SWALLOWED] Finnhub dividend fetch failed for %s: %r", symbol, e)
+        # Never log the request URL - it contains the Finnhub API token (leaked into logs daily until 2026-08-20)
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status == 403:
+            _FINNHUB_DIV_DISABLED = True
+            logger.info("[SWALLOWED] Finnhub dividend endpoint 403 (plan restriction) - disabling Finnhub dividend fallback for this run, Alpha/cache remain authoritative")
+        else:
+            logger.warning("[SWALLOWED] Finnhub dividend fetch failed for %s (HTTP %s): %s", symbol, status, type(e).__name__)
         return []
 
 def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
