@@ -326,7 +326,8 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
     if not targets:
         funnel = ", ".join(f"{k}={v}" for k, v in sorted(drops.items(), key=lambda kv: -kv[1])) or "none"
         logger.info(f"[ROLLER] {candidate.symbol}: 0 roll targets from {same_underlying} {candidate.underlying} contracts "
-                    f"(close_cost ${close_cost:.2f}, min_credit ${min_credit:.2f}) - drops: {funnel}")
+                    f"(close_cost ${close_cost:.2f}, min_credit ${min_credit:.2f}) - drops: {funnel}"
+                    + (" [chain empty after new-CSP pre-filter - see [DATA] option filter line; roll never evaluated]" if same_underlying == 0 else ""))
 
     return targets[:5]
 
