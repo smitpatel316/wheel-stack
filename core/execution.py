@@ -71,7 +71,7 @@ def _prefund_queue_with_sgov(client, deficit, risk_bp, queue):
         logger.info(f"[SGOV FUND] Pre-funding next-day queue: selling {shares} SGOV @ ~${price:.2f} (~${shares*price:.0f}) to cover ${amount:.0f} deficit (settles T+1)")
         order = client.market_sell_qty("SGOV", shares)
         sold = shares * price
-        queue.record_prefund(sold)
+        queue.record_prefund(sold, qty=shares)
         logger.info(f"[SGOV FUND] Pre-fund sale submitted (order {getattr(order, 'id', '?')}); queue prefunded total now ${queue.prefunded:.0f}")
         return sold
     except Exception as e:

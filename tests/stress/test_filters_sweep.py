@@ -262,6 +262,47 @@ class TestSgovSweep:
         fn(c, logging.getLogger("t"), risk_override=0)
         assert not c.stock_buys and not c.stock_sells
 
+    def test_sg10_low_stock_bp_never_forces_sell(self):
+        # 2026-08-21: with stock BP under the $1k buffer the old cap
+        # (max(0, stock_bp-1000) + sgov_mv) forced a sale of (1000-stock_bp)
+        # dollars BELOW current holdings — 10 shares sold in the morning run,
+        # 6 more midday, then a 1-share buy-back in the afternoon. Buying
+        # power constrains PURCHASES only; holding SGOV consumes none. Low BP
+        # must mean "no buys", never "forced sell".
+        fn, c = self._setup(cash=40_000, sgov_qty=616, stock_bp=0)
+        # liquid = 40000 + 616*100.50 = 101908; ideal target = 101408 -> 1009
+        # shares (buy side), real target capped at holdings (no buy capacity):
+        # 61908 -> exactly 616 shares -> no order either way.
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert not c.stock_sells and not c.stock_buys
+
+    def test_sg11_filled_prefund_sale_suppresses_double_sell(self):
+        # 2026-08-21 morning run: the funding-queue pre-fund market sale
+        # FILLED instantly, so the open-orders guard couldn't see it, and
+        # Alpaca's position endpoint still showed the pre-sale qty — the
+        # sweep sold the same 10 shares again 29s later. The pre-fund path
+        # now records its qty in the queue ledger; the sweep must subtract
+        # it even with no open order visible.
+        import json, os
+        from datetime import datetime as _dt
+        fn, c = self._setup(cash=4_495, sgov_qty=626, stock_bp=0, sgov_price=100.59)
+        qpath = os.environ["WHEEL_FUNDING_QUEUE"]
+        with open(qpath, "w") as f:
+            json.dump({"entries": [{"symbol": "X261016P00190000", "underlying": "X",
+                                    "strike": 190.0, "expiration": "2026-10-16",
+                                    "need": 19_000.0, "score": 0.05,
+                                    "queued_at": _dt.now().isoformat(timespec="seconds"),
+                                    "valid_for": _dt.now().date().isoformat()}],
+                       "prefunded": 5_000.0,
+                       "last_prefund": {"qty": 10,
+                                        "at": _dt.now().astimezone().isoformat(timespec="seconds")}}, f)
+        # reserve = 19000 - opt_bp(14000) = 5000; liquid = 4495 + 626*100.59
+        # = 67464; ideal target = 67464 - 500 - 5000 = 61964 -> 616 shares.
+        # Naive diff vs the stale 626 = -10 (would double-sell the pre-fund's
+        # 10); pending-prefund adjustment -> effective 616 -> no order.
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert not c.stock_sells and not c.stock_buys
+
 
 class TestPaperDiscipline:
     def test_p1_is_paper_true(self):

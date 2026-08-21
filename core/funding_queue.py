@@ -59,6 +59,7 @@ class FundingQueue:
         self.today = today or date.today()
         self.entries: list[dict] = []
         self.prefunded: float = 0.0
+        self.last_prefund: dict | None = None  # {"qty", "at"} of latest pre-fund sale
         self.broken = False   # corrupt file -> read-only mode, never pre-fund
         self.dirty = False
 
@@ -70,6 +71,7 @@ class FundingQueue:
             data = json.loads(self.path.read_text())
             self.entries = list(data.get("entries", []))
             self.prefunded = float(data.get("prefunded", 0.0) or 0.0)
+            self.last_prefund = data.get("last_prefund") or None
         except Exception as e:
             logger.warning(f"[FUND QUEUE] corrupt {self.path}: {e} - treating as empty, pre-funding DISABLED this run")
             self.entries = []
@@ -113,7 +115,8 @@ class FundingQueue:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
             tmp.write_text(json.dumps(
-                {"entries": self.entries, "prefunded": round(self.prefunded, 2)},
+                {"entries": self.entries, "prefunded": round(self.prefunded, 2),
+                 "last_prefund": self.last_prefund},
                 indent=2, sort_keys=True))
             os.replace(tmp, self.path)
             self.dirty = False
@@ -223,6 +226,35 @@ class FundingQueue:
         """
         return max(0.0, self.pending_need() - max(opt_bp or 0.0, 0.0) - self.prefunded)
 
-    def record_prefund(self, amount: float) -> None:
+    def record_prefund(self, amount: float, qty: int = 0) -> None:
         self.prefunded += max(0.0, amount)
+        if qty > 0:
+            self.last_prefund = {"qty": int(qty),
+                                 "at": datetime.now().astimezone().isoformat(timespec="seconds")}
         self.dirty = True
+
+    def pending_prefund_qty(self, max_age_min: float = 15) -> int:
+        """Shares from a pre-fund sale submitted moments ago.
+
+        The sweep's open-orders guard can't see a market order that already
+        filled, and Alpaca's position endpoint lags the fill (2026-08-21
+        morning run: pre-fund sold 10 at 10:07:09 ET; the sweep 29s later
+        still read the pre-sale qty and sold 10 MORE - a same-run
+        double-sell the Aug 18 guard was meant to prevent). Recording the
+        qty here lets the sweep subtract it even after the broker's order/
+        position views have moved on. Self-expires: after max_age_min the
+        sale is either reflected in positions or was rejected, and either
+        way it must no longer suppress the sweep.
+        """
+        lp = self.last_prefund or {}
+        at_raw = str(lp.get("at", "") or "")
+        qty = int(lp.get("qty", 0) or 0)
+        if not at_raw or qty <= 0:
+            return 0
+        try:
+            at = datetime.fromisoformat(at_raw)
+        except ValueError as e:
+            logger.debug("[SWALLOWED] funding queue last_prefund has bad timestamp %r, ignoring it: %r", at_raw, e)
+            return 0
+        age = (datetime.now().astimezone() - at).total_seconds()
+        return qty if 0 <= age <= max_age_min * 60 else 0

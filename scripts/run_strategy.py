@@ -76,12 +76,19 @@ def sync_sgov_real(client, logger, risk_override=None):
         # be swept back into SGOV (that buy-back was the churn removed
         # 2026-08-17). Reserve the part not already covered by settled BP.
         queue_reserve = 0.0
+        prefund_pending_qty = 0
         try:
             from core.funding_queue import FundingQueue
             _q = FundingQueue().load()
             _q.expire()
             _q.save()
             queue_reserve = _q.reserve_amount(opt_bp_sweep)
+            # A pre-fund market sale that already FILLED is invisible to the
+            # open-orders guard below, and Alpaca's position endpoint lags the
+            # fill — without this the sweep double-sells in the same run
+            # (2026-08-21 morning: pre-fund sold 10, sweep sold 10 more 29s
+            # later off the stale position read).
+            prefund_pending_qty = _q.pending_prefund_qty()
             if queue_reserve > 0:
                 logger.info(f"[SGOV] Holding back ${queue_reserve:.0f} from sweep for {len(_q.entries)} queued CSP candidate(s) (T+1 funding)")
         except Exception as _qe:
@@ -93,8 +100,13 @@ def sync_sgov_real(client, logger, risk_override=None):
         total_liquid = cash + sgov_mv  # total money market + cash
         target_sweep_mv_ideal = max(0, total_liquid - cashBuffer - queue_reserve)  # ideal Fidelity model: sweep all (minus queued-CSP reserve)
         # Alpaca realistic: limited by stock BP because SGOV is equity, not cash collateral
-        max_sgov_affordable = stock_bp - 1000  # keep $1k buffer for stock BP
-        target_sweep_mv_real = min(target_sweep_mv_ideal, max(0, max_sgov_affordable + sgov_mv))
+        # BP constrains NEW purchases only — holding existing SGOV consumes no
+        # buying power. The old cap (max(0, stock_bp-1000) + sgov_mv) forced a
+        # sale of (1000 - stock_bp) dollars whenever stock BP dipped under $1k
+        # (2026-08-21: forced sells of 10+6 shares in the morning/midday runs,
+        # then a 1-share buy-back in the afternoon — pure churn).
+        buy_capacity = max(0.0, stock_bp - 1000)  # keep $1k buffer for stock BP
+        target_sweep_mv_real = min(target_sweep_mv_ideal, sgov_mv + buy_capacity)
         # Use realistic for actual order
         target_sweep_mv = target_sweep_mv_real
         target_shares = math.floor(target_sweep_mv / sgov_price) if target_sweep_mv >= sgov_price else 0
@@ -125,6 +137,8 @@ def sync_sgov_real(client, logger, risk_override=None):
             open_orders = client.trade_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50))
             sgov_open_buy = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('buy')>=0)
             sgov_open_sell = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('sell')>=0)
+            if prefund_pending_qty > 0:
+                sgov_open_sell += prefund_pending_qty
             if sgov_open_buy > 0:
                 logger.info(f"[SGOV] Existing open BUY SGOV {sgov_open_buy} - skip duplicate")
                 diff = 0
@@ -575,6 +589,8 @@ def main():
                         logger.info(f"[ROLLER] {d.candidate.symbol} already rolled {n}x (max {MAX_ROLLS_PER_LINEAGE}) - letting it ride to expiry/assignment (v2.6 cap)")
                     else:
                         capped.append(d)
+                if is_market_open and len(capped) > 2:
+                    logger.info(f"[ROLLER] Per-run roll cap (2/run): deferring {len(capped) - 2} to next run: " + ", ".join(d.candidate.symbol for d in capped[2:]))
                 for decision in (capped[:2] if is_market_open else []):
                     try:
                         underlying = decision.candidate.underlying
