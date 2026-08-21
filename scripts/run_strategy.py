@@ -578,7 +578,13 @@ def main():
                 if not is_market_open:
                     logger.info(f"[ROLLER] Market closed - deferring {len(need_roll)} rolls to next open session")
                 # v2.6: cap defensive rolls per position lineage, then let it ride
-                roll_counts = prune_roll_counts(load_roll_counts(), states)
+                loaded_roll_counts = load_roll_counts()
+                roll_counts = prune_roll_counts(loaded_roll_counts, states)
+                if roll_counts != loaded_roll_counts:
+                    # Pruning was in-memory only until 2026-08-21 — dead
+                    # lineages (BAC:P, KO:P) lived in state/roll_counts.json
+                    # forever. Persist the prune.
+                    save_roll_counts(roll_counts)
                 if roll_counts:
                     logger.info(f"[ROLLER] Roll counts: {', '.join(f'{k} {v}/{MAX_ROLLS_PER_LINEAGE}' for k, v in sorted(roll_counts.items()))}")
                 capped = []

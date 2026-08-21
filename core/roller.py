@@ -428,6 +428,31 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
             comm_per = 0
 
         qty_abs = abs(candidate.qty)
+        # Pre-flight BP check (2026-08-21): never close a leg we can't
+        # re-open. Yesterday the BAC close filled, the open 403'd on
+        # insufficient options BP, and the wheel leg broke — realized loss
+        # taken, replacement never opened, and the funding queue (hints-only,
+        # consumed by fresh scans) couldn't resurrect a roll leg. Estimate
+        # post-close BP (close frees the old collateral minus buy-back cost)
+        # and abort the roll when it can't cover the new leg; the position
+        # rides and the roller re-evaluates next run. Critical DTE<=1
+        # assignment-avoidance rolls keep the old close-anyway behavior —
+        # avoiding assignment matters more than a broken wheel leg.
+        if candidate.dte is None or candidate.dte > 1:
+            try:
+                acct = client.get_account()
+                opt_bp_now = float(getattr(acct, 'options_buying_power', 0) or 0)
+                freed = (candidate.strike * 100 - (candidate.current_price or 0) * 100) * qty_abs
+                required = target.strike * 100 * qty_abs  # conservative: ignores premium offset
+                if opt_bp_now + freed < required:
+                    log.warning(
+                        f"[ROLL] Aborting {candidate.symbol} -> {target.symbol}: est. post-close options BP "
+                        f"${opt_bp_now + freed:.0f} < required ~${required:.0f} - keeping position, "
+                        f"retry next run once funding-queue cash settles")
+                    return False
+            except Exception as e:
+                log.warning(f"[ROLL] Aborting {candidate.symbol} -> {target.symbol}: BP pre-flight check failed ({e}) - not closing a leg we may not be able to re-open")
+                return False
         # Real P/L for closing leg
         gross_close = (candidate.avg_entry_price - candidate.current_price) * 100 * qty_abs if candidate.avg_entry_price and candidate.current_price else 0
         fees_close = comm_per * qty_abs * 2

@@ -197,6 +197,56 @@ class TestRollTargets:
         assert sides[0].endswith("buy") and sides[1].endswith("sell"), \
             "close must be submitted before open"
 
+    def _target(self, strike=49.0, dte=56, net_credit=0.11):
+        from core.roller import RollTarget
+        return RollTarget(
+            symbol=f"XYZ_T{int(strike*100)}", strike=strike,
+            expiration=date.today() + timedelta(days=dte), dte=dte,
+            bid_price=0.87, ask_price=0.90, delta=-0.2, oi=500,
+            premium_rate=0.015, annualized_yield=0.1, net_credit=net_credit,
+            roll_type="defensive", reasoning="test")
+
+    def test_ro12_preflight_bp_aborts_uncoverable_roll(self):
+        # 2026-08-21 (daily review): BAC260904P00061000's close leg filled,
+        # then the open leg 403'd on options BP — realized loss taken and the
+        # replacement never opened (the funding queue is hints-only; nothing
+        # consumes it for a roll leg). Non-critical rolls must abort BEFORE
+        # the close when est. post-close BP can't cover the new leg.
+        from tests.stress.fakes import FakeAccount
+        c = FakeBrokerClient(FakeAccount(options_buying_power=-2000.0))
+        # freed = (61 - 0.60)*100 = 6040; post-close BP ~4040 < required 5750
+        cand = _cand(dte=15, strike=61.0, und=59.5, current=0.60)
+        ok = roll_position(c, cand, self._target(strike=57.5))
+        assert not ok
+        assert not c.submitted, "close must not happen when the open can't be funded"
+
+    def test_ro12b_preflight_bp_passes_when_funded(self):
+        c = FakeBrokerClient()  # default options_buying_power 14000
+        cand = _cand(dte=15, strike=50.0, und=49.0, current=1.30)
+        import core.roller as ro
+        orig_sleep = ro.time.sleep
+        ro.time.sleep = lambda *_: None
+        try:
+            ok = roll_position(c, cand, self._target(strike=49.0))
+        finally:
+            ro.time.sleep = orig_sleep
+        assert ok and len(c.submitted) == 2
+
+    def test_ro12c_critical_dte1_still_closes_anyway(self):
+        # Assignment avoidance at DTE<=1 outranks the broken-leg risk: the
+        # pre-flight check must NOT block critical rolls.
+        from tests.stress.fakes import FakeAccount
+        c = FakeBrokerClient(FakeAccount(options_buying_power=-2000.0))
+        cand = _cand(dte=1, strike=61.0, und=59.5, current=0.60)
+        import core.roller as ro
+        orig_sleep = ro.time.sleep
+        ro.time.sleep = lambda *_: None
+        try:
+            ok = roll_position(c, cand, self._target(strike=57.5, dte=20))
+        finally:
+            ro.time.sleep = orig_sleep
+        assert ok and len(c.submitted) == 2
+
 
 class TestOccParsing:
     def test_parse_occ(self):
