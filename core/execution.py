@@ -237,6 +237,12 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
         queue = FundingQueue().load()
         queue.expire()
         newly_queued = 0
+        # Visibility: a queued entry that today's scan doesn't re-select is
+        # otherwise silent all run (BAC 2026-08-21 sat pending with no log line).
+        if queue.entries:
+            logger.info(f"[FUND QUEUE] pending: " + ", ".join(
+                f"{e.get('symbol')} ${float(e.get('need', 0)):.0f} (queued {str(e.get('queued_at', '?'))[:10]})"
+                for e in queue.entries))
 
         for p in selected:
             need = 100 * p.strike
@@ -286,6 +292,20 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 if opt_bp is not None:
                     opt_bp += need
                 if "buying power" in str(e).lower() or "insufficient" in str(e).lower():
+                    # Alpaca's BP disagreed with our local view (stale/None
+                    # opt_bp) — queue the candidate for T+1 funding instead of
+                    # dropping it silently (F 2026-08-21 vanished this way).
+                    if queue.pending_need() + need <= max(buying_power, 0):
+                        score_val_q = 0
+                        try:
+                            score_val_q = scores[put_options.index(p)]
+                        except Exception as e2:
+                            logger.debug("[SWALLOWED] score lookup failed for %s, using 0: %r", getattr(p, 'symbol', '?'), e2)
+                        if queue.add(p.symbol, p.underlying, p.strike, p.expiration, need, score_val_q):
+                            newly_queued += 1
+                            logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} - broker BP shortfall, queued for next-day funding (T+1)")
+                        else:
+                            logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} - already queued, still unfunded")
                     logger.info(f"Stopping new CSPs: Alpaca reports insufficient buying power after {p.symbol} - remaining candidates skipped this run")
                     break
                 continue
