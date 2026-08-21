@@ -546,6 +546,12 @@ def main():
             })
             strat_logger.log_roll_decisions(roll_decisions)
             need_roll = [d for d in roll_decisions if d.should_roll]
+            # v2.6 visibility: surface positions the loss-gate is holding back so the
+            # daily review can judge the new trigger, not just count rolls.
+            gated = [d for d in roll_decisions if not d.should_roll
+                     and any("premium-loss alone" in r for r in d.reasons)]
+            for d in gated:
+                logger.info(f"[ROLLER] HOLD {d.candidate.symbol}: loss {d.candidate.loss_pct:.0%} but {d.decision_factors.get('otm_pct',0):.1%} OTM delta {d.candidate.delta} - v2.6 gate (would have flagged pre-v2.6)")
             # Prioritize: critical (DTE<=1) first, then high/medium, then nearest expiry.
             # Was evaluation order — in a sell-off the 2-roll-per-run cap could skip the
             # position that actually gets assigned.
@@ -559,6 +565,8 @@ def main():
                     logger.info(f"[ROLLER] Market closed - deferring {len(need_roll)} rolls to next open session")
                 # v2.6: cap defensive rolls per position lineage, then let it ride
                 roll_counts = prune_roll_counts(load_roll_counts(), states)
+                if roll_counts:
+                    logger.info(f"[ROLLER] Roll counts: {', '.join(f'{k} {v}/{MAX_ROLLS_PER_LINEAGE}' for k, v in sorted(roll_counts.items()))}")
                 capped = []
                 for d in need_roll:
                     lineage = f"{d.candidate.underlying}:{'P' if d.candidate.is_put else 'C'}"

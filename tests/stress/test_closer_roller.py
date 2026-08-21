@@ -121,6 +121,8 @@ class TestRollerDecisions:
         # v2.6: premium doubled but 20% OTM with delta -0.25 -> hold, don't realize early
         d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=60.0, delta=-0.25))
         assert not d.should_roll
+        # run_strategy greps this exact phrase to emit the [ROLLER] HOLD visibility line
+        assert any("premium-loss alone" in r for r in d.reasons)
 
     def test_ro7c_loss_over_100pct_no_delta_far_otm_no_roll(self):
         d = evaluate_roll_need(_cand(entry=1.0, current=2.5, strike=50.0, und=60.0, delta=None))
