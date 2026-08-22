@@ -1,5 +1,6 @@
 """
-Optionable dashboard push — engine observability (capital card + scan funnel).
+Optionable dashboard push — engine observability (capital card + scan funnel +
+open positions).
 
 Self-contained module added 2026-08-14 (Smit-approved, inspired by the
 AllYouNeedIsWheel review). Attached at the start of a run, it tees stdout AND
@@ -27,11 +28,13 @@ Usage (see docs/dashboard-sync.patch):
 Read/display only — never places orders. Fail-safe: any error here must never
 break the trading run, so every public method swallows exceptions after logging.
 """
+import datetime
 import logging
 import os
 import re
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -39,6 +42,8 @@ logger = logging.getLogger("strategy.optionable_dashboard_sync")
 
 OPTIONABLE_URL = os.getenv("OPTIONABLE_URL", "http://localhost:8096")
 TIMEOUT = 8
+
+_ET = ZoneInfo("America/New_York")
 
 
 class _TeeStream:
@@ -95,6 +100,148 @@ _RE_SELL_FAILED = re.compile(r"Sell failed for ([A-Z]+\d{6}[PC]\d+)")
 _RE_SKIP_OBP = re.compile(r"Skipping ([A-Z]+\d{6}[PC]\d+) strike \$([\d.]+): needs \$([\d.]+) > Alpaca options BP \$([\d.]+)")
 _RE_SKIP_BP = re.compile(r"Skipping ([A-Z]+\d{6}[PC]\d+) strike \$([\d.]+) need \$([\d.]+) > BP \$([\d.]+)")
 _RE_OCC = re.compile(r"^([A-Z]+)\d{6}[PC]")
+
+
+# ---------- open positions (Open Positions table, added 2026-08-22) ----------
+
+
+def _fnum(val, default=0.0):
+    """Float-or-default; never raises."""
+    try:
+        f = float(val)
+        return f if f == f else default  # NaN guard
+    except Exception:
+        return default
+
+
+def _underlying_price(client, symbol):
+    """Latest trade price for an underlying via the engine's data client.
+    Returns None on any failure — never raises."""
+    try:
+        res = client.get_stock_latest_trade(symbol)
+        trade = res.get(symbol) if hasattr(res, "get") else res
+        price = getattr(trade, "price", None)
+        return float(price) if price else None
+    except Exception as e:
+        logger.debug("[SWALLOWED] latest-trade fetch for %s failed (otmPct will be null): %r", symbol, e)
+        return None
+
+
+def collect_open_positions(client, roll_counts=None, funding_entries=None,
+                           today=None, price_fetcher=None) -> Tuple[list, list]:
+    """Build the openPositions + fundingQueue payload pieces for the dashboard.
+
+    Row shape (must match optionable-src/src/components/positions/OpenPositionsTable.jsx):
+      symbol, underlying, type (CSP|CC|SGOV|STOCK|OPT), label?, strike, expiry,
+      dte, contracts, entryPrice, currentPrice, marketValue, unrealizedPL,
+      unrealizedPLpct, otmPct (positive = out of the money, negative = ITM;
+      null when the underlying price can't be fetched), rollsUsed?, rollsMax?
+
+    Failure-isolated like the rest of this module: a bad position is skipped
+    with a [SWALLOWED] log, and total failure returns ([], []). Never raises.
+    """
+    from core.optionable_sync import _parse_occ  # local import: keeps module load light
+    try:
+        if today is None:
+            today = datetime.datetime.now(_ET).date()
+        if roll_counts is None:
+            try:
+                from core.state_manager import load_roll_counts
+                roll_counts = load_roll_counts()
+            except Exception as e:
+                logger.debug("[SWALLOWED] roll-count load for dashboard positions failed: %r", e)
+                roll_counts = {}
+        if funding_entries is None:
+            try:
+                from core.funding_queue import FundingQueue
+                funding_entries = list(FundingQueue().load().entries)
+            except Exception as e:
+                logger.debug("[SWALLOWED] funding-queue load for dashboard positions failed: %r", e)
+                funding_entries = []
+        fetch_price = price_fetcher or (lambda sym: _underlying_price(client, sym))
+
+        rows = []
+        for p in (client.get_positions() or []):
+            try:
+                sym = str(getattr(p, "symbol", "") or "").strip()
+                if not sym:
+                    continue
+                qty = _fnum(getattr(p, "qty", 0))
+                side = str(getattr(p, "side", "") or "").lower()
+                is_short = side == "short" or (not side and qty < 0)
+                row = {
+                    "symbol": sym,
+                    "underlying": sym,
+                    "type": "STOCK",
+                    "strike": None,
+                    "expiry": None,
+                    "dte": None,
+                    "contracts": abs(int(qty)),
+                    "entryPrice": _fnum(getattr(p, "avg_entry_price", 0)),
+                    "currentPrice": _fnum(getattr(p, "current_price", 0)),
+                    "marketValue": _fnum(getattr(p, "market_value", 0)),
+                    "unrealizedPL": _fnum(getattr(p, "unrealized_pl", 0)),
+                    "unrealizedPLpct": _fnum(getattr(p, "unrealized_plpc", 0)) * 100,
+                    "otmPct": None,
+                }
+                parsed = _parse_occ(sym) if _RE_OCC.match(sym) else None
+                if parsed:
+                    underlying, expiry_iso, opt_type, strike, _ = parsed
+                    row["underlying"] = underlying
+                    row["strike"] = strike
+                    row["expiry"] = expiry_iso
+                    try:
+                        row["dte"] = (datetime.date.fromisoformat(expiry_iso) - today).days
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] dte math for %s failed: %r", sym, e)
+                    if is_short:
+                        row["type"] = "CSP" if opt_type == "Put" else "CC"
+                    else:
+                        row["type"] = "OPT"  # long option — the wheel never holds these
+                    if row["type"] in ("CSP", "CC") and strike:
+                        u = fetch_price(underlying)
+                        if u:
+                            if row["type"] == "CSP":
+                                row["otmPct"] = round((u - strike) / u * 100, 2)
+                            else:
+                                row["otmPct"] = round((strike - u) / u * 100, 2)
+                elif sym == "SGOV":
+                    row["type"] = "SGOV"
+                    row["label"] = "cash sweep"
+                # roll usage: lineage key matches underlying + option side
+                if row["type"] == "CSP":
+                    used = roll_counts.get(f"{row['underlying']}:P")
+                elif row["type"] == "CC":
+                    used = roll_counts.get(f"{row['underlying']}:C")
+                else:
+                    used = None
+                if used:
+                    row["rollsUsed"] = int(used)
+                    row["rollsMax"] = 2  # MAX_ROLLS_PER_LINEAGE
+                rows.append(row)
+            except Exception as e:
+                logger.warning("[SWALLOWED] dashboard position row build failed for %r: %r",
+                               getattr(p, "symbol", "?"), e)
+                continue
+
+        queue_rows = []
+        for e in funding_entries:
+            try:
+                queue_rows.append({
+                    "symbol": e.get("symbol"),
+                    "underlying": e.get("underlying"),
+                    "strike": e.get("strike"),
+                    "need": e.get("need"),
+                    "queued_at": e.get("queued_at"),
+                    "valid_for": e.get("valid_for"),
+                })
+            except Exception as ex:
+                logger.debug("[SWALLOWED] funding-queue row build failed: %r", ex)
+                continue
+        return rows, queue_rows
+    except Exception as e:
+        logger.warning("[DASH] collect_open_positions failed (non-fatal): %r", e)
+        return [], []
 
 
 class EngineDashboardPush:
@@ -252,12 +399,18 @@ class EngineDashboardPush:
                 payload["snapshot"] = self.snapshot
             if rows or self.aggregate_rejects:
                 payload["scanRun"] = scan_run
+            # Open positions + funding queue for the Open Positions table.
+            open_positions, funding_queue = [], []
+            if client is not None:
+                open_positions, funding_queue = collect_open_positions(client)
+                payload["openPositions"] = open_positions
+                payload["fundingQueue"] = funding_queue
             if not payload:
                 logger.info("[DASH] nothing collected this run - skipping push")
                 return False
             r = requests.post(f"{self.base_url}/api/engine/dashboard", json=payload, timeout=TIMEOUT)
             if r.status_code == 200:
-                logger.info(f"[DASH] pushed snapshot+scan funnel ({len(rows)} symbols) to Optionable")
+                logger.info(f"[DASH] pushed snapshot+scan funnel ({len(rows)} symbols, {len(open_positions)} positions) to Optionable")
                 return True
             logger.warning(f"[DASH] Optionable push HTTP {r.status_code}: {r.text[:200]}")
             return False
