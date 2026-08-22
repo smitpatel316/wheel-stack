@@ -110,7 +110,9 @@ def _fnum(val, default=0.0):
     try:
         f = float(val)
         return f if f == f else default  # NaN guard
-    except Exception:
+    except Exception as e:
+        # swallow:intentional - broker payload fields can be None/odd; default is correct
+        logger.debug("[SWALLOWED] _fnum(%r) -> default %s: %r", val, default, e)
         return default
 
 
