@@ -179,6 +179,28 @@ class TestSgovFunding:
         assert not c.option_sells and not c.stock_sells
         assert len(FundingQueue().load().entries) == 0
 
+    def test_r4l_fresh_same_underlying_not_double_counted_by_cap(self):
+        # 2026-08-21 (real): fresh BAC $59 CSP ($5,900) was skipped because
+        # the headroom cap added the STALE queued BAC $57.50 entry ($5,750)
+        # to the fresh need — $11,650 > $6,750 headroom — so add() never ran
+        # and Thursday's stale strike/expiry stayed queued, expiring unfunded.
+        # add() replaces same-underlying entries, so the cap must ignore the
+        # entry the candidate is about to replace.
+        stale = FundingQueue(today=date.today())
+        stale.add("BAC261016P00057500", "BAC", 57.5, "2026-10-16", 5_750, 0.047)
+        stale.dirty = True
+        stale.save()
+        c = _client_with_puts([("BAC", 59, 0.60, -0.18)], opt_bp=1_000)  # settled BP < $5,900 need
+        c.add_sgov(600)
+        sell_puts(c, ["BAC"], 6_750,  # Friday's real remaining risk headroom
+                  execution_config={"limit_enabled": False, "wait_seconds": 0},
+                  fund_with_sgov=True)
+        assert not c.option_sells, "still T+1 queued, never sold same-day"
+        q = FundingQueue().load()
+        bac = [e for e in q.entries if e["underlying"] == "BAC"]
+        assert len(bac) == 1 and bac[0]["strike"] == 59.0, \
+            "fresh candidate must replace the stale same-underlying entry, not be blocked by it"
+
     def test_r4e_prefund_caps_at_holdings(self):
         c = self._rich_client(opt_bp=13_900, sgov_qty=100)
         q = FundingQueue().load()

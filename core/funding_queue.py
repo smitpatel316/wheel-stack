@@ -210,6 +210,20 @@ class FundingQueue:
     def pending_need(self) -> float:
         return sum(float(e.get("need", 0) or 0) for e in self.entries)
 
+    def pending_need_except(self, underlying: str) -> float:
+        """Pending need ignoring entries for one underlying.
+
+        add() REPLACES any same-underlying entry, so when the headroom cap
+        weighs a fresh candidate it must not also count the stale entry it
+        is about to replace — that double-counts one contract's risk as two
+        (2026-08-21: fresh BAC $59 CSP skipped because the cap added stale
+        queued BAC $57.50 + fresh $59 = $11.65k against $6.75k headroom;
+        the replacement never happened and the stale entry expired unsold).
+        """
+        return sum(float(e.get("need", 0) or 0)
+                   for e in self.entries
+                   if e.get("underlying") != underlying)
+
     def reserve_amount(self, opt_bp: float | None) -> float:
         """Cash that must stay OUT of the SGOV sweep for queued candidates.
 

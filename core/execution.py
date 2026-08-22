@@ -255,8 +255,10 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 # Cap total queued need at remaining risk headroom: without this
                 # the queue over-reserved (3 AAPL contracts, $134k held back
                 # against ~$42k headroom on 2026-08-18) and drained the sweep.
-                if queue.pending_need() + need > max(buying_power, 0):
-                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} - skipped: queue ${queue.pending_need():.0f} + need would exceed remaining risk headroom ${buying_power:.0f}")
+                # add() replaces same-underlying entries, so don't count the
+                # stale entry this candidate is about to replace.
+                if queue.pending_need_except(p.underlying) + need > max(buying_power, 0):
+                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} - skipped: queue ${queue.pending_need_except(p.underlying):.0f} + need would exceed remaining risk headroom ${buying_power:.0f}")
                     continue
                 score_val = 0
                 try:
@@ -295,7 +297,7 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                     # Alpaca's BP disagreed with our local view (stale/None
                     # opt_bp) — queue the candidate for T+1 funding instead of
                     # dropping it silently (F 2026-08-21 vanished this way).
-                    if queue.pending_need() + need <= max(buying_power, 0):
+                    if queue.pending_need_except(p.underlying) + need <= max(buying_power, 0):
                         score_val_q = 0
                         try:
                             score_val_q = scores[put_options.index(p)]
