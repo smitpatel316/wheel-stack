@@ -125,6 +125,7 @@ def test_funding_queue_passthrough_explicit():
     _, fq = collect_open_positions(FakeClient([]), roll_counts={},
                                    funding_entries=entries, today=TODAY)
     assert fq == [{"symbol": "BAC261016P00057500", "underlying": "BAC", "strike": 57.5,
+                   "expiry": "2026-10-16",
                    "need": 5750.0, "queued_at": "2026-08-20T19:06:29+00:00",
                    "valid_for": "2026-08-21"}]
 
