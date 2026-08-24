@@ -167,10 +167,11 @@ class TestSellCalls:
 class TestSgovSweep:
     """SG: sync_sgov_real sweep math — both directions market, no dupes."""
 
-    def _setup(self, cash, sgov_qty, stock_bp, sgov_price=100.50):
+    def _setup(self, cash, sgov_qty, stock_bp, sgov_price=100.50, opt_bp=14_000.0):
         from scripts.run_strategy import sync_sgov_real
         c = FakeBrokerClient(FakeAccount(cash=cash, equity=cash + sgov_qty * sgov_price,
-                                         buying_power=stock_bp))
+                                         buying_power=stock_bp,
+                                         options_buying_power=opt_bp))
         if sgov_qty:
             c.positions.append(FakePosition("SGOV", sgov_qty, sgov_price, sgov_price))
         c.stock_trades["SGOV"] = sgov_price
@@ -302,6 +303,50 @@ class TestSgovSweep:
         # 10); pending-prefund adjustment -> effective 616 -> no order.
         fn(c, logging.getLogger("t"), risk_override=0)
         assert not c.stock_sells and not c.stock_buys
+
+    @staticmethod
+    def _write_queue(qpath, need, prefunded=0.0):
+        import json
+        from datetime import date as _date, timedelta as _td, datetime as _dt
+        tomorrow = (_date.today() + _td(days=1)).isoformat()
+        with open(qpath, "w") as f:
+            json.dump({"entries": [{"symbol": "BAC261016P00057500", "underlying": "BAC",
+                                    "strike": 57.5, "expiration": "2026-10-16",
+                                    "need": float(need), "score": 0.04,
+                                    "queued_at": _dt.now().isoformat(timespec="seconds"),
+                                    "valid_for": tomorrow}],
+                       "prefunded": float(prefunded)}, f)
+
+    def test_sg12_queue_pending_blocks_sweep_buy(self):
+        # 2026-08-24 live bug: morning pre-fund sold 54 SGOV ($5434) for the
+        # queued BAC $5750 CSP; the midday sweep saw the fresh cash and bought
+        # 64 SGOV back ($6440) because the stock-BP buy cap — not the queue
+        # reserve — was the binding target. Options BP went to $0 and the
+        # afternoon BAC sell failed 40310000 (required 5681, available 0).
+        # Every swept $1 is $1 less settled cash = $1 less options BP for the
+        # queue; with need > current options BP, no buy may happen at all.
+        import os
+        fn, c = self._setup(cash=45_898, sgov_qty=557, stock_bp=7_540,
+                            sgov_price=100.63, opt_bp=1_884)
+        self._write_queue(os.environ["WHEEL_FUNDING_QUEUE"], need=5_750,
+                          prefunded=5_656)
+        # Without the guard: real target = 56051 + (7540-1000) = 62591 -> 621
+        # shares -> diff +64 buy. With the guard: headroom = 1884-5750 < 0 -> 0.
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert not c.stock_buys, "sweep must not re-buy SGOV while a CSP queue is underfunded"
+        assert not c.stock_sells
+
+    def test_sg13_queue_pending_caps_buy_to_bp_headroom(self):
+        # Same guard, partial headroom: options BP exceeds the queue need, so
+        # only the excess may be swept.
+        import os
+        fn, c = self._setup(cash=45_898, sgov_qty=557, stock_bp=7_540,
+                            sgov_price=100.63, opt_bp=8_000)
+        self._write_queue(os.environ["WHEEL_FUNDING_QUEUE"], need=5_750)
+        # headroom = 8000 - 5750 = 2250 -> floor(2250/100.63) = 22 shares
+        fn(c, logging.getLogger("t"), risk_override=0)
+        assert c.stock_buys == [("SGOV", 22)]
+        assert not c.stock_sells
 
 
 class TestPaperDiscipline:

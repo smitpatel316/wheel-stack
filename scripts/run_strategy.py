@@ -76,6 +76,7 @@ def sync_sgov_real(client, logger, risk_override=None):
         # be swept back into SGOV (that buy-back was the churn removed
         # 2026-08-17). Reserve the part not already covered by settled BP.
         queue_reserve = 0.0
+        queue_need_pending = 0.0
         prefund_pending_qty = 0
         try:
             from core.funding_queue import FundingQueue
@@ -83,6 +84,7 @@ def sync_sgov_real(client, logger, risk_override=None):
             _q.expire()
             _q.save()
             queue_reserve = _q.reserve_amount(opt_bp_sweep)
+            queue_need_pending = _q.pending_need()
             # A pre-fund market sale that already FILLED is invisible to the
             # open-orders guard below, and Alpaca's position endpoint lags the
             # fill — without this the sweep double-sells in the same run
@@ -158,6 +160,22 @@ def sync_sgov_real(client, logger, risk_override=None):
                     diff = new_diff
         except Exception as e:
             logger.debug(f"Open order check failed: {e}")
+
+        # Funding-queue BP guard (2026-08-24): every $1 swept into SGOV is $1
+        # less settled cash, i.e. ~$1 less options buying power for the queued
+        # CSP it is funding. The reserve above only shrinks the IDEAL target;
+        # when the stock-BP buy cap binds instead, the reserve does nothing and
+        # the sweep re-buys the very cash the pre-fund sale just freed.
+        # 2026-08-24: pre-fund sold 54 SGOV in the morning for the BAC queue,
+        # the midday sweep bought 64 back (stock-BP cap binding), options BP
+        # went to $0, and the afternoon BAC sell failed 40310000. While a queue
+        # is pending, cap buys so options BP coverage of the queue is preserved.
+        if diff > 0 and queue_need_pending > 0:
+            bp_headroom = max(0.0, opt_bp_sweep - queue_need_pending)
+            bp_cap_shares = int(bp_headroom // sgov_price)
+            if diff > bp_cap_shares:
+                logger.info(f"[SGOV] Queue BP guard: pending CSP need ${queue_need_pending:.0f} vs options BP ${opt_bp_sweep:.0f} - capping sweep buy {diff} -> {bp_cap_shares} (swept cash is tomorrow's options BP)")
+                diff = bp_cap_shares
 
         if diff > 0:
             logger.info(f"[SGOV SWEEP] Buying {diff} SGOV @ ${sgov_price:.2f} to earn interest on ${diff*sgov_price:.0f} collateral (Fidelity SPAXX sweep)")
