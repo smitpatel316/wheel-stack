@@ -169,8 +169,11 @@ def collect_open_positions(client, roll_counts=None, funding_entries=None,
                 if not sym:
                     continue
                 qty = _fnum(getattr(p, "qty", 0))
-                side = str(getattr(p, "side", "") or "").lower()
-                is_short = side == "short" or (not side and qty < 0)
+                raw_side = getattr(p, "side", "") or ""
+                # alpaca-py returns a PositionSide enum whose str() is
+                # "PositionSide.SHORT" — read .value when present.
+                side = str(getattr(raw_side, "value", raw_side)).lower()
+                is_short = side == "short" or qty < 0
                 row = {
                     "symbol": sym,
                     "underlying": sym,

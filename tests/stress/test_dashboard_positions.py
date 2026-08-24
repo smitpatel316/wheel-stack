@@ -192,3 +192,36 @@ def test_push_survives_position_collection_failure(monkeypatch):
     assert ok is True
     assert fake_post.payload["openPositions"] == []
     assert fake_post.payload["fundingQueue"] == []
+
+
+class _FakePositionSide:
+    """Mimics alpaca-py's PositionSide enum: str() is 'PositionSide.SHORT',
+    .value is 'short'. Regression for 2026-08-24: enum str() broke the
+    is_short check so shorts rendered as OPT rows with null otmPct."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return f"PositionSide.{self.value.upper()}"
+
+
+def test_enum_side_short_put_is_csp_with_otm():
+    client = FakeClient(
+        [_pos("INTC260918P00090000", -1, _FakePositionSide("short"), 2.50, 4.00, -150.0, -0.60)],
+        prices={"INTC": 88.0},
+    )
+    rows, _ = collect_open_positions(client, roll_counts={}, funding_entries=[], today=TODAY)
+    r = rows[0]
+    assert r["type"] == "CSP"
+    assert r["otmPct"] == round((88.0 - 90.0) / 88.0 * 100, 2)
+
+
+def test_enum_side_positive_qty_short_is_csp():
+    # qty positive but side enum short -> still short (side wins)
+    client = FakeClient(
+        [_pos("INTC260918P00090000", 1, _FakePositionSide("short"), 2.50, 4.00, -150.0, -0.60)],
+        prices={"INTC": 88.0},
+    )
+    rows, _ = collect_open_positions(client, roll_counts={}, funding_entries=[], today=TODAY)
+    assert rows[0]["type"] == "CSP"
