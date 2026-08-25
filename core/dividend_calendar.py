@@ -53,7 +53,8 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
                 logger.debug("[SWALLOWED] parsing OVERVIEW ex-dividend date %r for %s: %r", ex, symbol, e)
                 pass
     except Exception as e:
-        logger.warning("[SWALLOWED] Alpha OVERVIEW dividend fetch failed for %s, falling back to DIVIDENDS endpoint: %r", symbol, e)
+        msg = repr(e).replace(key, "***") if key else repr(e)
+        logger.warning("[SWALLOWED] Alpha OVERVIEW dividend fetch failed for %s, falling back to DIVIDENDS endpoint: %s", symbol, msg)
         pass
 
     # Fallback to DIVIDENDS endpoint
@@ -71,7 +72,8 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
                 result.append({"symbol": symbol.upper(), "exDate": ex, "amount": entry.get("amount"), "source": "DIVIDENDS"})
         return result
     except Exception as e:
-        logger.warning("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s: %r", symbol, e)
+        msg = repr(e).replace(key, "***") if key else repr(e)
+        logger.warning("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s: %s", symbol, msg)
         # print(f"[DIVIDEND] Alpha {symbol} failed: {e}")
         return []
 
@@ -122,21 +124,25 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
     today = date.today()
     future = today + timedelta(days=days_ahead)
     cache: Dict[str, date] = {}
+    stale: Dict[str, date] = {}  # any-age on-disk entries, fallback on fetch failure
+    had_nonempty_file = False
     if CACHE_FILE.exists():
         try:
             raw = json.loads(CACHE_FILE.read_text())
             ts = raw.get("_timestamp", 0)
+            had_nonempty_file = bool(raw.get("dividends"))
+            for entry in raw.get("dividends", []):
+                sym = entry.get("symbol", "").upper()
+                if sym in set(s.upper() for s in symbols):
+                    try:
+                        d = datetime.fromisoformat(entry.get("exDate","")).date()
+                        if (d - today).days >= -1:
+                            stale[sym] = d
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] parsing cached dividend entry for %s: %r", sym, e)
+                        pass
             if time.time() - ts < CACHE_TTL:
-                for entry in raw.get("dividends", []):
-                    sym = entry.get("symbol", "").upper()
-                    if sym in set(s.upper() for s in symbols):
-                        try:
-                            d = datetime.fromisoformat(entry.get("exDate","")).date()
-                            if (d - today).days >= -1:
-                                cache[sym] = d
-                        except Exception as e:
-                            logger.debug("[SWALLOWED] parsing cached dividend entry for %s: %r", sym, e)
-                            pass
+                cache.update(stale)
                 if cache:
                     print(f"[DIVIDEND] Cache hit {len(cache)} from {CACHE_FILE}")
                     return cache
@@ -170,21 +176,30 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                     continue
         time.sleep(0.4)
 
-    for k,v in cache.items():
+    fresh_found = bool(dividend_map)
+    for k,v in stale.items():
         if k not in dividend_map:
             dividend_map[k] = v
 
-    try:
-        LOG_DIR.mkdir(exist_ok=True)
-        CACHE_FILE.write_text(json.dumps({
-            "_timestamp": time.time(),
-            "_from": today.isoformat(),
-            "_to": future.isoformat(),
-            "dividends": [{"symbol": k, "exDate": v.isoformat()} for k,v in dividend_map.items()]
-        }, indent=2))
-    except Exception as e:
-        logger.debug("[SWALLOWED] writing dividend cache %s: %r", CACHE_FILE, e)
-        pass
+    if not fresh_found and had_nonempty_file:
+        # Every fetch failed (or every cached dividend passed): never overwrite
+        # a non-empty cache with nothing, and don't refresh its timestamp on a
+        # stale merge — the next run should retry the APIs, not TTL-block on
+        # old data (seen in the 2026-08-25 Alpha outage).
+        print("[DIVIDEND] No fresh dividends fetched - keeping prior cache file untouched; dividend screen on stale data")
+        logger.warning("[DIVIDEND] fetch round produced no fresh data; preserving existing cache")
+    else:
+        try:
+            LOG_DIR.mkdir(exist_ok=True)
+            CACHE_FILE.write_text(json.dumps({
+                "_timestamp": time.time(),
+                "_from": today.isoformat(),
+                "_to": future.isoformat(),
+                "dividends": [{"symbol": k, "exDate": v.isoformat()} for k,v in dividend_map.items()]
+            }, indent=2))
+        except Exception as e:
+            logger.debug("[SWALLOWED] writing dividend cache %s: %r", CACHE_FILE, e)
+            pass
 
     return dividend_map
 

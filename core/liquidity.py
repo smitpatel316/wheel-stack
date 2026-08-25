@@ -49,8 +49,9 @@ def fetch_daily_volume_alpha(symbol: str, days: int = 30) -> List[int]:
                 pass
         return vols
     except Exception as e:
-        logger.warning("[SWALLOWED] Alpha TIME_SERIES_DAILY volume fetch failed for %s: %r", symbol, e)
-        print(f"[LIQ] {symbol} vol fetch failed: {e}")
+        msg = repr(e).replace(key, "***") if key else repr(e)
+        logger.warning("[SWALLOWED] Alpha TIME_SERIES_DAILY volume fetch failed for %s: %s", symbol, msg)
+        print(f"[LIQ] {symbol} vol fetch failed: {msg}")
         return []
 
 def evaluate_liquidity(symbol: str, current_volume: int = None, current_oi: int = None) -> Dict:

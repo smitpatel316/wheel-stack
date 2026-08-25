@@ -53,8 +53,9 @@ def fetch_daily_alpha(symbol: str, days: int = 300) -> List[float]:
         closes.reverse()  # oldest first
         return closes
     except Exception as e:
-        log.debug("[SWALLOWED] Alpha daily fetch failed for %s: %r", symbol, e)
-        print(f"[VOL] Alpha {symbol} daily failed: {e}")
+        msg = repr(e).replace(key, "***") if key else repr(e)
+        log.debug("[SWALLOWED] Alpha daily fetch failed for %s: %s", symbol, msg)
+        print(f"[VOL] Alpha {symbol} daily failed: {msg}")
         return []
 
 def realized_vol(closes: List[float], window: int = 20) -> float:
@@ -96,13 +97,15 @@ def compute_rv_rank(closes: List[float]) -> Tuple[float, float, float]:
     return (rv_20, rv_60, rank)
 
 def build_cache(symbols: List[str]) -> Dict[str, Dict]:
+    stale: Dict[str, Dict] = {}  # any-age on-disk real entries, fallback on fetch failure
     if CACHE_FILE.exists():
         try:
             raw = json.loads(CACHE_FILE.read_text())
             ts = raw.get("_timestamp", 0)
+            data = {e["symbol"]: e for e in raw.get("volatility", [])}
+            stale = {s: e for s, e in data.items() if e.get("source") == "alpha_daily"}
             if time.time() - ts < CACHE_TTL:
                 # return if all symbols present
-                data = {e["symbol"]: e for e in raw.get("volatility", [])}
                 if all(s.upper() in data for s in symbols[:5]):
                     print(f"[VOL] Cache hit {len(data)}")
                     return data
@@ -111,6 +114,7 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             pass
 
     vol_map: Dict[str, Dict] = {}
+    fresh = 0
     # Only fetch for few symbols per run due to rate limit (TIME_SERIES_DAILY is heavy)
     for sym in symbols[:8]:
         closes = fetch_daily_alpha(sym)
@@ -124,6 +128,10 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 "closes_count": len(closes),
                 "source": "alpha_daily"
             }
+            fresh += 1
+        elif sym.upper() in stale:
+            # keep last real reading instead of a synthetic default
+            vol_map[sym.upper()] = stale[sym.upper()]
         else:
             vol_map[sym.upper()] = {
                 "symbol": sym.upper(),
@@ -134,15 +142,23 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             }
         time.sleep(0.6)
 
-    try:
-        LOG_DIR.mkdir(exist_ok=True)
-        CACHE_FILE.write_text(json.dumps({
-            "_timestamp": time.time(),
-            "volatility": list(vol_map.values())
-        }, indent=2))
-    except Exception as e:
-        log.debug("[SWALLOWED] volatility cache write failed: %r", e)
-        pass
+    if fresh == 0:
+        n_stale = sum(1 for v in vol_map.values() if v.get("source") == "alpha_daily")
+        print(f"[VOL] All Alpha fetches failed - serving stale/default vol data ({n_stale} stale real, rest default IVR=50); IV screen degraded")
+        log.warning("[VOL] all Alpha daily fetches failed; vol map is stale/default only")
+
+    # Only persist when at least one fresh fetch succeeded: writing a
+    # default-only map would poison the cache (as happened on 2026-08-25).
+    if fresh > 0:
+        try:
+            LOG_DIR.mkdir(exist_ok=True)
+            CACHE_FILE.write_text(json.dumps({
+                "_timestamp": time.time(),
+                "volatility": list(vol_map.values())
+            }, indent=2))
+        except Exception as e:
+            log.debug("[SWALLOWED] volatility cache write failed: %r", e)
+            pass
 
     return vol_map
 

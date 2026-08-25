@@ -23,6 +23,11 @@ def get_alpha_key():
         logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
+def _redact(err: Exception, key: str) -> str:
+    """repr(err) with the API key scrubbed (requests exceptions embed the full URL)."""
+    s = repr(err)
+    return s.replace(key, "***") if key else s
+
 def fetch_overview_alpha(symbol: str) -> Dict:
     key = get_alpha_key()
     if not key:
@@ -39,8 +44,8 @@ def fetch_overview_alpha(symbol: str) -> Dict:
             return {}
         return data
     except Exception as e:
-        logger.warning("[SWALLOWED] Alpha OVERVIEW fetch failed for %s: %r", symbol, e)
-        print(f"[FUND] Overview {symbol} failed: {e}")
+        logger.warning("[SWALLOWED] Alpha OVERVIEW fetch failed for %s: %s", symbol, _redact(e, key))
+        print(f"[FUND] Overview {symbol} failed: {_redact(e, key)}")
         return {}
 
 def fetch_balance_sheet_alpha(symbol: str) -> Dict:
@@ -76,21 +81,23 @@ def fetch_balance_sheet_alpha(symbol: str) -> Dict:
             logger.debug("[SWALLOWED] computing Debt/Equity from balance sheet for %s: %r", symbol, e)
             return {}
     except Exception as e:
-        logger.warning("[SWALLOWED] Alpha BALANCE_SHEET fetch failed for %s: %r", symbol, e)
+        logger.warning("[SWALLOWED] Alpha BALANCE_SHEET fetch failed for %s: %s", symbol, _redact(e, key))
         # print(f"[FUND] Balance {symbol} failed: {e}")
         return {}
 
 def build_cache(symbols: List[str]) -> Dict[str, Dict]:
     cache: Dict[str, Dict] = {}
+    stale: Dict[str, Dict] = {}  # any-age on-disk entries, used as fallback on fetch failure
     if CACHE_FILE.exists():
         try:
             raw = json.loads(CACHE_FILE.read_text())
             ts = raw.get("_timestamp", 0)
+            for entry in raw.get("fundamentals", []):
+                sym = entry.get("symbol", "").upper()
+                if sym in set(s.upper() for s in symbols):
+                    stale[sym] = entry
             if time.time() - ts < CACHE_TTL:
-                for entry in raw.get("fundamentals", []):
-                    sym = entry.get("symbol", "").upper()
-                    if sym in set(s.upper() for s in symbols):
-                        cache[sym] = entry
+                cache.update(stale)
                 if cache:
                     print(f"[FUND] Cache hit {len(cache)}")
                     return cache
@@ -130,19 +137,32 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 overview_map[sym.upper()]["totalDebt"] = bs.get("totalDebt")
             time.sleep(1.0)  # balance sheet heavier, 1s gap
 
-    for k,v in cache.items():
+    fresh = len(overview_map)
+    for k, v in stale.items():
         if k not in overview_map:
             overview_map[k] = v
+    if fresh == 0 and stale:
+        age_h = 0.0
+        try:
+            age_h = (time.time() - json.loads(CACHE_FILE.read_text()).get("_timestamp", 0)) / 3600
+        except Exception as e:
+            logger.debug("[SWALLOWED] computing fundamentals cache age for log line: %r", e)
+        print(f"[FUND] All Alpha fetches failed - serving stale cache ({len(stale)} symbols, age {age_h:.1f}h); fundamentals screen degraded")
+        logger.warning("[FUND] all Alpha overview fetches failed; using stale cache (%d symbols)", len(stale))
 
-    try:
-        LOG_DIR.mkdir(exist_ok=True)
-        CACHE_FILE.write_text(json.dumps({
-            "_timestamp": time.time(),
-            "fundamentals": list(overview_map.values())
-        }, indent=2))
-    except Exception as e:
-        logger.debug("[SWALLOWED] writing fundamentals cache %s: %r", CACHE_FILE, e)
-        pass
+    # Never overwrite the cache when every fetch failed: the old file keeps its
+    # old timestamp so the next run retries the APIs instead of TTL-blocking
+    # on stale data for another 24h.
+    if fresh > 0:
+        try:
+            LOG_DIR.mkdir(exist_ok=True)
+            CACHE_FILE.write_text(json.dumps({
+                "_timestamp": time.time(),
+                "fundamentals": list(overview_map.values())
+            }, indent=2))
+        except Exception as e:
+            logger.debug("[SWALLOWED] writing fundamentals cache %s: %r", CACHE_FILE, e)
+            pass
 
     return overview_map
 
