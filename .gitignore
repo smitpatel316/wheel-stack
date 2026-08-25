@@ -68,3 +68,7 @@ test-results/
 blob-report/
 state/
 .venv/
+
+# Robinhood session tokens (rh feed)
+tokens.json
+**/tokens.json
