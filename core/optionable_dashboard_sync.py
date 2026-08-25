@@ -266,14 +266,43 @@ class EngineDashboardPush:
     # ---- lifecycle ----
 
     def install(self):
-        """Tee stdout/stderr so printed and logged lines are both parsed."""
+        """Tee stdout/stderr so printed and logged lines are both parsed.
+
+        Also rebinds any StreamHandler the 'strategy' logger (or its children)
+        already attached to the real stdout/stderr: logging.StreamHandler
+        captures the stream object at construction time, so handlers created
+        before install() would keep writing to the original stream and their
+        lines ([ACCOUNT], [CONTEXT], [SGOV] — the entire snapshot) would never
+        reach the parser. print() resolves sys.stdout dynamically and is not
+        affected, which is why the scan funnel worked while the snapshot
+        stayed empty.
+        """
         try:
             if self._orig_stdout is None:
                 self._orig_stdout, self._orig_stderr = sys.stdout, sys.stderr
                 sys.stdout = _TeeStream(self._orig_stdout, self._on_line)
                 sys.stderr = _TeeStream(self._orig_stderr, self._on_line)
+            self._rebind_logger_streams()
         except Exception as e:
             logger.warning(f"[DASH] install failed: {e}")
+
+    def _rebind_logger_streams(self):
+        """Point pre-existing 'strategy' StreamHandlers at the tee streams."""
+        try:
+            strat = logging.getLogger("strategy")
+            for log in [strat] + [
+                logging.getLogger(n) for n in list(logging.Logger.manager.loggerDict)
+                if isinstance(n, str) and n.startswith("strategy")
+            ]:
+                for h in getattr(log, "handlers", []):
+                    if not isinstance(h, logging.StreamHandler):
+                        continue
+                    if h.stream is self._orig_stdout:
+                        h.setStream(sys.stdout)
+                    elif h.stream is self._orig_stderr:
+                        h.setStream(sys.stderr)
+        except Exception as e:
+            logger.debug("[SWALLOWED] logger stream rebind failed: %r", e)
 
     def uninstall(self):
         try:

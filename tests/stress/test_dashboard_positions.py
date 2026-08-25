@@ -6,6 +6,7 @@ price can't be fetched, roll-count mapping, funding-queue passthrough, and
 the push() payload wiring (network stubbed — never hits the live dashboard).
 """
 import json
+import sys
 from datetime import date
 from types import SimpleNamespace
 
@@ -225,3 +226,72 @@ def test_enum_side_positive_qty_short_is_csp():
     )
     rows, _ = collect_open_positions(client, roll_counts={}, funding_entries=[], today=TODAY)
     assert rows[0]["type"] == "CSP"
+
+
+# ---------- snapshot capture: logger StreamHandler rebind (2026-08-25) ----------
+
+
+def _fresh_strategy_logger():
+    """Return a bare 'strategy.*' logger namespace for an isolated test."""
+    import logging
+    for name in list(logging.Logger.manager.loggerDict):
+        if isinstance(name, str) and name.startswith("strategy"):
+            lg = logging.getLogger(name)
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+    root = logging.getLogger("strategy")
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    return root
+
+
+def test_install_rebinds_preexisting_streamhandler():
+    """Regression: setup_logger() binds sys.stdout at construction time, so a
+    StreamHandler created BEFORE dash install kept writing to the real stdout
+    and [ACCOUNT]/[CONTEXT]/[SGOV] lines never reached the parser — the
+    Optionable capital card showed its empty state forever (2026-08-25)."""
+    import logging
+
+    root = _fresh_strategy_logger()
+    # Mimic app_logging.logger_setup: handler bound to the pre-tee stdout.
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter("[%(message)s]"))
+    root.addHandler(ch)
+    root.setLevel(logging.INFO)
+
+    push = EngineDashboardPush()
+    push.install()
+    try:
+        assert ch.stream is not push._orig_stdout, "handler still bound to pre-tee stdout"
+        root.info("[ACCOUNT] Equity $100000.00 Cash $40000 Stock BP $200 Options BP $48 Risk $83250/90000")
+        root.info("[CONTEXT] Regime=NEUTRAL VIX=17.5")
+        sys.stdout.flush()
+        assert push.snapshot.get("equity") == 100000.00
+        assert push.snapshot.get("optionsBuyingPower") == 48.0
+        assert push.snapshot.get("riskUsed") == 83250.0
+        assert push.snapshot.get("regime") == "NEUTRAL"
+    finally:
+        push.uninstall()
+        _fresh_strategy_logger()
+
+
+def test_install_leaves_file_handler_alone(tmp_path):
+    """Rebind must not touch FileHandlers (FileHandler subclasses StreamHandler)."""
+    import logging
+
+    root = _fresh_strategy_logger()
+    fh = logging.FileHandler(tmp_path / "run.log")
+    root.addHandler(fh)
+    root.setLevel(logging.INFO)
+
+    push = EngineDashboardPush()
+    push.install()
+    try:
+        assert fh.stream is not None and hasattr(fh.stream, "write")
+        root.info("[ACCOUNT] Equity $1.0 Cash $1 Stock BP $1 Options BP $1 Risk $1/90000")
+        fh.flush()
+        contents = (tmp_path / "run.log").read_text()
+        assert "[ACCOUNT]" in contents  # file handler still gets the line
+    finally:
+        push.uninstall()
+        _fresh_strategy_logger()
