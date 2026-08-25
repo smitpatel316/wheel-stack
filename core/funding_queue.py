@@ -79,7 +79,41 @@ class FundingQueue:
             self.broken = True
             return self
         self.dedupe_by_underlying()
+        self._reset_stale_prefund()
         return self
+
+    def _reset_stale_prefund(self) -> None:
+        """The prefunded ledger bridges INTRADAY runs only: it stops a
+        same-day second run from re-selling SGOV for the same queue
+        (2026-08-21 10:07/10:07+29s double-sell). Overnight the sale settles
+        and the proceeds show up in options buying power, so counting the
+        ledger again the next day double-credits the queue. Worse, if the
+        cash never materialised (2026-08-24: the pre-1c2aa24 sweep re-bought
+        the pre-fund the same day), a stale ledger suppresses the funding
+        sale forever and the queue dead-locks (BAC failed Mon PM + Tue AM
+        with prefunded $5,958 against real options BP of $46). New trading
+        day -> trust options BP, zero the ledger.
+        """
+        if self.prefunded <= 0:
+            return
+        ref = self.last_prefund
+        if not ref:
+            # Legacy state with a ledger but no sale record: fall back to the
+            # newest entry's queued date — a ledger older than that day is
+            # stale by the same logic.
+            dates = [str(e.get("queued_at", ""))[:10] for e in self.entries]
+            ref = {"at": max(dates)} if dates else None
+        if not ref:
+            return
+        try:
+            sold_day = datetime.fromisoformat(str(ref.get("at", ""))).date()
+        except ValueError as exc:
+            logger.warning("[SWALLOWED] funding queue last_prefund.at %r unparseable, resetting prefunded ledger: %r", ref, exc)
+            sold_day = None
+        if sold_day is None or sold_day < self.today:
+            logger.info(f"[FUND QUEUE] new trading day: resetting prefunded ${self.prefunded:.0f} -> $0 (sale proceeds settle into options BP overnight)")
+            self.prefunded = 0.0
+            self.dirty = True
 
     def dedupe_by_underlying(self) -> list[dict]:
         """Keep only the newest entry per underlying (last one wins).

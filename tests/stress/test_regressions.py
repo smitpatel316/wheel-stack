@@ -376,7 +376,10 @@ class TestFundingQueueMath:
         aapl = [e for e in q.entries if e["underlying"] == "AAPL"]
         assert len(q.entries) == 2, "load() must drop stale same-underlying duplicates"
         assert len(aapl) == 1 and aapl[0]["symbol"] == "AAPL260911P00295000", "newest entry wins"
-        assert q.prefunded == 81_465.75, "dedupe must not touch the prefunded ledger (mirrors add())"
+        # Dedupe itself never touches the ledger — but this fixture's entries are
+        # from 2026-08-18, so the new-day stale-ledger reset (2026-08-25 fix)
+        # zeroes it on load. Assert the current end-state of both rules.
+        assert q.prefunded == 0.0, "stale ledger from a prior trading day resets on load"
         assert q.dirty, "dedupe must persist on next save()"
 
     def test_mark_filled_drops_same_underlying_entries(self):
@@ -406,6 +409,58 @@ class TestFundingQueueMath:
         from datetime import date as _d
         assert next_trading_day(_d(2026, 8, 14)) == _d(2026, 8, 17)  # Fri -> Mon
         assert next_trading_day(_d(2026, 8, 17)) == _d(2026, 8, 18)  # Mon -> Tue
+
+    def test_prefund_ledger_resets_next_trading_day(self, tmp_path):
+        # 2026-08-25: the 08-24 pre-fund ($5,958) was re-spent same-day by the
+        # pre-1c2aa24 sweep, but the stale ledger still claimed coverage, so
+        # the 08-25 10:05 ET run skipped the funding sale and BAC dead-locked
+        # (options BP $46 vs need $5,900). Overnight the sale settles into
+        # options BP — the ledger must zero on a new trading day.
+        p = tmp_path / "q.json"
+        p.write_text(json.dumps({
+            "entries": [{"symbol": "BAC260918P00059000", "underlying": "BAC",
+                         "strike": 59.0, "expiration": "2026-09-18",
+                         "need": 5900.0, "score": 0.05,
+                         "queued_at": "2026-08-25T14:58:37+00:00",
+                         "valid_for": "2026-08-26"}],
+            "prefunded": 5957.88,
+            "last_prefund": {"qty": 3, "at": "2026-08-24T19:06:32+00:00"},
+        }))
+        q = FundingQueue(path=p, today=date(2026, 8, 25)).load()
+        assert q.prefunded == 0.0, "yesterday's ledger is settled into options BP — reset it"
+        assert q.prefund_deficit(opt_bp=46) == 5854.0  # sells SGOV again today
+        # Same-day second run must NOT reset (2026-08-21 double-sell guard):
+        q.record_prefund(5_854, qty=58)
+        q.save()
+        q2 = FundingQueue(path=p, today=date(2026, 8, 25)).load()
+        assert q2.prefunded == 5_854.0
+        assert q2.prefund_deficit(opt_bp=46) == 0, "same-day: ledger still bridges until settlement"
+
+    def test_prefund_ledger_reset_ignores_future_and_today(self, tmp_path):
+        # Same-day ledger (timestamp this morning) survives the reset.
+        p = tmp_path / "q.json"
+        p.write_text(json.dumps({
+            "entries": [{"symbol": "X260918P00010000", "underlying": "X",
+                         "strike": 10.0, "expiration": "2026-09-18",
+                         "need": 1000.0, "score": 0.05,
+                         "queued_at": "2026-08-25T13:00:00+00:00",
+                         "valid_for": "2026-08-26"}],
+            "prefunded": 1000.0,
+            "last_prefund": {"qty": 10, "at": "2026-08-25T14:05:00+00:00"},
+        }))
+        q = FundingQueue(path=p, today=date(2026, 8, 25)).load()
+        assert q.prefunded == 1000.0
+        # Ledger with no sale record falls back to entry queued_at (legacy state).
+        p.write_text(json.dumps({
+            "entries": [{"symbol": "Y260918P00010000", "underlying": "Y",
+                         "strike": 10.0, "expiration": "2026-09-18",
+                         "need": 1000.0, "score": 0.05,
+                         "queued_at": "2026-08-24T14:05:00+00:00",
+                         "valid_for": "2026-08-25"}],
+            "prefunded": 1000.0,
+        }))
+        q = FundingQueue(path=p, today=date(2026, 8, 25)).load()
+        assert q.prefunded == 0.0
 
 
 class TestOptionableSyncIsolation:
