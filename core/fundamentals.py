@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+from core.data_fallbacks import fetch_overview_finnhub
+
 logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -106,7 +108,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             pass
 
     overview_map: Dict[str, Dict] = {}
-    # Phase 1: overview for all
+    fallback_used = 0
+    # Phase 1: overview for all (Alpha -> Finnhub metric fallback -> stale cache)
     for sym in symbols[:12]:
         data = fetch_overview_alpha(sym)
         if data and data.get("Symbol"):
@@ -125,12 +128,29 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 "QuarterlyEarningsGrowthYOY": data.get("QuarterlyEarningsGrowthYOY"),
                 "QuarterlyRevenueGrowthYOY": data.get("QuarterlyRevenueGrowthYOY"),
                 "DebtEquity": None,
+                "source": "alpha_overview",
             }
+        else:
+            fb = fetch_overview_finnhub(sym)
+            if fb:
+                fb["symbol"] = sym.upper()
+                overview_map[sym.upper()] = fb
+                fallback_used += 1
+                print(f"[FUND] {sym.upper()} via finnhub-fallback")
+                logger.info("[FUND] %s fundamentals served by finnhub-fallback", sym.upper())
         time.sleep(0.6)
 
-    # Phase 2: balance sheet for debt/equity (only for high priority, rate limited 5/min)
+    if fallback_used:
+        print(f"[FUND] {fallback_used}/{min(len(symbols),12)} symbols served by finnhub-fallback (Alpha down)")
+        logger.warning("[FUND] %d symbols on finnhub-fallback this run", fallback_used)
+
+    # Phase 2: balance sheet for debt/equity (only for high priority, rate limited 5/min).
+    # Finnhub-fallback entries already carry DebtEquity (longTermDebt/equityAnnual) -
+    # skip them so a flaky Alpha doesn't overwrite good fallback data with nothing.
     for sym in symbols[:8]:  # fewer to avoid rate limit
         if sym.upper() in overview_map:
+            if overview_map[sym.upper()].get("source") == "finnhub_metric":
+                continue
             bs = fetch_balance_sheet_alpha(sym)
             if bs and bs.get("DebtEquity") is not None:
                 overview_map[sym.upper()]["DebtEquity"] = bs["DebtEquity"]

@@ -13,6 +13,8 @@ from pathlib import Path
 from datetime import date, timedelta, datetime
 from typing import Dict, List, Tuple
 
+from core.data_fallbacks import fetch_daily_bars_alpaca
+
 log = logging.getLogger(__name__)
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -103,7 +105,7 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             raw = json.loads(CACHE_FILE.read_text())
             ts = raw.get("_timestamp", 0)
             data = {e["symbol"]: e for e in raw.get("volatility", [])}
-            stale = {s: e for s, e in data.items() if e.get("source") == "alpha_daily"}
+            stale = {s: e for s, e in data.items() if e.get("source") in ("alpha_daily", "alpaca_bars")}
             if time.time() - ts < CACHE_TTL:
                 # return if all symbols present
                 if all(s.upper() in data for s in symbols[:5]):
@@ -115,9 +117,19 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
 
     vol_map: Dict[str, Dict] = {}
     fresh = 0
+    fallback_used = 0
     # Only fetch for few symbols per run due to rate limit (TIME_SERIES_DAILY is heavy)
     for sym in symbols[:8]:
         closes = fetch_daily_alpha(sym)
+        source = "alpha_daily"
+        if not closes:
+            bars = fetch_daily_bars_alpaca(sym, days=450)  # ~300 trading days
+            if bars:
+                closes = [b["close"] for b in bars]
+                source = "alpaca_bars"
+                fallback_used += 1
+                print(f"[VOL] {sym.upper()} via alpaca-bars-fallback ({len(closes)} bars)")
+                log.info("[VOL] %s daily closes served by alpaca-bars-fallback", sym.upper())
         if closes:
             rv20, rv60, rv_rank = compute_rv_rank(closes)
             vol_map[sym.upper()] = {
@@ -126,7 +138,7 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 "rv_60d": round(rv60, 2),
                 "iv_rank_proxy": round(rv_rank, 1),  # proxy for IV Rank
                 "closes_count": len(closes),
-                "source": "alpha_daily"
+                "source": source
             }
             fresh += 1
         elif sym.upper() in stale:
@@ -143,9 +155,12 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
         time.sleep(0.6)
 
     if fresh == 0:
-        n_stale = sum(1 for v in vol_map.values() if v.get("source") == "alpha_daily")
+        n_stale = sum(1 for v in vol_map.values() if v.get("source") in ("alpha_daily", "alpaca_bars"))
         print(f"[VOL] All Alpha fetches failed - serving stale/default vol data ({n_stale} stale real, rest default IVR=50); IV screen degraded")
         log.warning("[VOL] all Alpha daily fetches failed; vol map is stale/default only")
+    elif fallback_used:
+        print(f"[VOL] {fallback_used}/{min(len(symbols),8)} symbols served by alpaca-bars-fallback (Alpha down)")
+        log.warning("[VOL] %d symbols on alpaca-bars-fallback this run", fallback_used)
 
     # Only persist when at least one fresh fetch succeeded: writing a
     # default-only map would poison the cache (as happened on 2026-08-25).

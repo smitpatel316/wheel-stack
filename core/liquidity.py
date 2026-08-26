@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+from core.data_fallbacks import fetch_daily_bars_alpaca
+
 logger = logging.getLogger(f"strategy.{__name__}")
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -71,6 +73,12 @@ def evaluate_liquidity(symbol: str, current_volume: int = None, current_oi: int 
             pass
     if not vols:
         vols = fetch_daily_volume_alpha(sym, days=30)
+        if not vols:
+            bars = fetch_daily_bars_alpaca(sym, days=45)  # ~30 trading days
+            if bars:
+                vols = [b["volume"] for b in bars]
+                print(f"[LIQ] {sym.upper()} via alpaca-bars-fallback ({len(vols)} bars)")
+                logger.info("[LIQ] %s volume trend served by alpaca-bars-fallback", sym.upper())
         if vols:
             try:
                 LOG_DIR.mkdir(exist_ok=True)
