@@ -5,26 +5,6 @@ from .strategy import filter_underlying, filter_options, score_options, select_o
 from models.contract import Contract
 import numpy as np
 
-import os as _os
-if _os.getenv("ENABLE_WHEELER_SYNC", "").lower() in ("1", "true", "yes"):
-    try:
-        from .wheeler_sync import push_option_to_wheeler
-        def _push_wheeler(sym, premium, contracts=1):
-            try:
-                push_option_to_wheeler(sym, premium, contracts)
-            except Exception as e:
-                logger.warning("[SWALLOWED] wheeler sync push failed for %s: %r", sym, e)
-                pass
-    except ImportError as e:
-        logging.getLogger(f"strategy.{__name__}").debug("[SWALLOWED] wheeler_sync import unavailable, using no-op push: %r", e)
-        def _push_wheeler(sym, premium, contracts=1):
-            pass
-else:
-    # Wheeler tracker was replaced by Optionable; its old REST paths 404.
-    # Set ENABLE_WHEELER_SYNC=1 to re-enable.
-    def _push_wheeler(sym, premium, contracts=1):
-        pass
-
 logger = logging.getLogger(f"strategy.{__name__}")
 
 import math as _math
@@ -312,7 +292,6 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                     break
                 continue
 
-            _push_wheeler(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1)
             try:
                 push_trade_to_optionable(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1, delta=getattr(p, 'delta', None))
             except Exception as e:
@@ -401,7 +380,6 @@ def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, mar
             logger.warning(f"Market sell failed for {contract.symbol}: {e}")
             return
 
-        _push_wheeler(contract.symbol, (exec_result.get("price") if exec_result else contract.bid_price) or 0, contracts=1)
         try:
             push_trade_to_optionable(contract.symbol, (exec_result.get("price") if exec_result else contract.bid_price) or 0, contracts=1, delta=getattr(contract, 'delta', None))
         except Exception as e:

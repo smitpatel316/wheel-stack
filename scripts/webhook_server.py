@@ -22,13 +22,20 @@ from urllib.parse import parse_qs, urlsplit
 log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
+
+try:  # load .env so FINNHUB_WEBHOOK_SECRET never has to live in tracked config
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError as e:
+    logging.getLogger(__name__).debug("[SWALLOWED] python-dotenv unavailable, relying on process env only: %r", e)
+
 LOGS = ROOT / "logs"
 EVENTS_LOG = LOGS / "webhook_events.jsonl"
 EARNINGS_CACHE = LOGS / "earnings_cache.json"
 PORT = int(os.environ.get("WEBHOOK_PORT", "8644"))
 
 # Robinhood Agentic Trading MCP OAuth callback (read-only connector project).
-# https://webhook.smitpatel.net/oauth/robinhood/callback routes here via the
+# The /oauth/robinhood/callback path is routed here via a
 # Cloudflare tunnel. State is validated against pending_auth.json written by
 # rh_mcp_client.py `auth`; the code is stashed for rh_mcp_client.py `finish`.
 RH_DIR = Path(os.environ.get(

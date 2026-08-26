@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SGOV <-> Alpaca <-> Optionable sync - REAL Alpaca execution path
-Wheeler legacy removed, primary tracker now Optionable at wheel.smitpatel.net:8096
+Wheeler legacy removed, primary tracker is Optionable (default http://localhost:8096)
 """
 import math, datetime, sys, os, time, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

@@ -1,12 +1,9 @@
 {
-  "public_url": "https://webhook.smitpatel.net/webhooks/finnhub-earnings",
+  "public_url": "https://your-domain.example/webhooks/finnhub-earnings",
   "local_url": "http://localhost:8644/webhooks/finnhub-earnings",
-  "secret": "***REMOVED***50",
+  "secret": "set FINNHUB_WEBHOOK_SECRET in .env instead - this placeholder is not used when the env var is set",
   "events": ["earnings"],
   "provider": "finnhub",
-  "notes": "Finnhub custom webhook - POST earnings events {symbol, date, type, hour} to block CSPs before earnings. NVDA Jun -$154k bag lesson. Currently manual server because hermes-gateway restart blocked from inside (safety). Healthy at /health returns {status:ok}. Events logged to ~/.hermes/webhook_events.jsonl",
-  "finnhub_api_key_env": "FINNHUB_API_KEY=***REMOVED***3g***REMOVED***40 (stored in .env and ~/.hermes/.env)",
-  "cloudflare_hostname": "webhook.smitpatel.net -> localhost:8644 via ingress in ~/.cloudflared/config.yml",
-  "setup": "1. DNS CNAME webhook.smitpatel.net -> pi-tunnel via cloudflared tunnel route dns, 2. manual webhook server ~/.hermes/scripts/manual-webhook.py running on 8644 background, 3. hermes webhook subscribe finnhub-earnings stored in ~/.hermes/webhook_subscriptions.json, 4. Finnhub webhook URL not natively supported - this is custom for your own scripts to POST earnings alerts. Finnhub itself does not have webhook feature, but you can use this endpoint from your own earnings monitor or from Finnhub websocket -> POST",
-  "test_curl": "curl -X POST https://webhook.smitpatel.net/webhooks/finnhub-earnings -H 'Content-Type: application/json' -d '{\"symbol\":\"CSCO\",\"date\":\"2026-08-19\",\"type\":\"earnings\"}'"
+  "notes": "POST earnings events {symbol, date, type} to block CSPs ahead of earnings. The receiver (scripts/webhook_server.py) validates X-Finnhub-Secret against FINNHUB_WEBHOOK_SECRET from .env, logs to logs/webhook_events.jsonl, and clears the cached earnings calendar. GET /health returns {status: ok}.",
+  "finnhub_api_key_env": "FINNHUB_API_KEY"
 }

@@ -1,6 +1,6 @@
 """
 Optionable ↔ options-wheel bridge - Full sync including closes
-Pushes Alpaca trades into Optionable tracker (wheel.smitpatel.net:8096)
+Pushes Alpaca trades into Optionable tracker (default http://localhost:8096)
 
 Fixes applied audit 2026-08-03:
 - Commission 0 for paper
