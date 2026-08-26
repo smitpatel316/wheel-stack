@@ -12,7 +12,6 @@ from core.activities_sync import sync_dividends_and_interest, sync_option_events
 from core.context_analyzer import analyze_context, adapt_params, save_context_log
 from core.roller import evaluate_all_positions, find_roll_targets, roll_position
 from core.closer import evaluate_all_for_close, close_position
-from core.strategy import filter_options
 from core.earnings_calendar import build_cache as earnings_build_cache, get_earnings_risk_report
 from models.contract import Contract
 import math
@@ -641,8 +640,12 @@ def main():
                             except Exception as e:
                                 logger.debug("[SWALLOWED] roll-target snapshot build failed for %s, skipping contract: %r", getattr(co, 'symbol', '?'), e)
                                 continue
-                        avail_filtered = filter_options(avail, vol_map=vol_map)
-                        targets = find_roll_targets(decision.candidate, avail_filtered, decision, config={
+                        # Roll targets must NOT pass through the new-CSP screen
+                        # (filter_options): its delta band / premium / yield gates
+                        # are for new entries and can empty the chain so the roll
+                        # is never evaluated (NEE 2026-08-26). find_roll_targets
+                        # applies its own roll-specific filters on the raw chain.
+                        targets = find_roll_targets(decision.candidate, avail, decision, config={
                             "min_credit": -0.20 if decision.urgency=="critical" and decision.candidate.dte<=1 else 0.10,
                             "dte_extension_min": 7,
                             "dte_extension_max": 21,
