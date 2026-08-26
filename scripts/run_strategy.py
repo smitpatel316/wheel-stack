@@ -370,10 +370,15 @@ def main():
         from core.liquidity import get_liquidity_report
         liquidity_map = get_liquidity_report(SYMBOLS[:10])
         drying = [s for s,r in liquidity_map.items() if not r.get("trend_ok", True)]
+        no_data = [s for s,r in liquidity_map.items() if not r.get("avg_20d") and not r.get("avg_5d")]
+        if no_data:
+            logger.warning(f"[LIQ] NO volume data for {len(no_data)}/{len(liquidity_map)} symbols {no_data[:5]} (Alpha fetch failed, cache empty) - liquidity trend screen INACTIVE this run")
         if drying:
             logger.info(f"[LIQ] Drying detected: {drying}")
             for s in drying[:5]:
                 logger.info(f"  - {s}: {liquidity_map[s].get('reason')} 5d {liquidity_map[s].get('avg_5d',0)/1e6:.1f}M 20d {liquidity_map[s].get('avg_20d',0)/1e6:.1f}M")
+        elif no_data:
+            logger.info(f"[LIQ] trends OK for {len(liquidity_map)-len(no_data)} symbols with data; {len(no_data)} unscreened (no data)")
         else:
             logger.info(f"[LIQ] All volume trends OK top10 {list(liquidity_map.keys())[:5]}")
         if hasattr(strat_logger, 'log_entry'):

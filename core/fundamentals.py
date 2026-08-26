@@ -149,6 +149,9 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
             logger.debug("[SWALLOWED] computing fundamentals cache age for log line: %r", e)
         print(f"[FUND] All Alpha fetches failed - serving stale cache ({len(stale)} symbols, age {age_h:.1f}h); fundamentals screen degraded")
         logger.warning("[FUND] all Alpha overview fetches failed; using stale cache (%d symbols)", len(stale))
+    elif fresh == 0 and not stale:
+        print("[FUND] WARNING: NO fundamentals data (all Alpha fetches failed, cache empty) - fundamentals screen INACTIVE this run; all symbols pass unscreened")
+        logger.warning("[FUND] no fundamentals data (fetch failed, cache empty); screen inactive this run")
 
     # Never overwrite the cache when every fetch failed: the old file keeps its
     # old timestamp so the next run retries the APIs instead of TTL-blocking
