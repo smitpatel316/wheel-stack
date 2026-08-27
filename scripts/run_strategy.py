@@ -3,7 +3,7 @@ from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
 from core.state_manager import update_state, calculate_risk, calculate_exposures, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
-from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED
+from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER
 from app_logging.strategy_logger import StrategyLogger
 from app_logging.logger_setup import setup_logger
 from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, sync_closed_trades
@@ -408,7 +408,21 @@ def main():
     try:
         logger.info("[CONTEXT] Analyzing market regime Yahoo v8 VIX real")
         market_ctx = analyze_context(client=client, symbols=SYMBOLS, use_llm=False)
-        adapted = adapt_params(market_ctx)
+        # v2.7 dynamic risk base: cap = everything deployable into CSPs without
+        # margin = settled cash + treasury ETF (SGOV) value - cash buffer.
+        # Grows/shrinks with the account so gains compound back into the wheel.
+        dynamic_base = None
+        try:
+            from core.state_manager import TREASURY_SYMBOLS
+            _acct = client.get_account()
+            _cash = float(getattr(_acct, 'cash', 0) or 0)
+            _treas = sum(float(p.market_value or 0) for p in client.get_positions()
+                         if getattr(p, 'symbol', '') in TREASURY_SYMBOLS and float(getattr(p, 'qty', 0) or 0) > 0)
+            dynamic_base = max(0, int(_cash + _treas - SGOV_CASH_BUFFER))
+            logger.info(f"[RISK] Dynamic MAX_RISK base ${dynamic_base:,} (cash ${_cash:,.0f} + treasuries ${_treas:,.0f} - buffer) replaces hardcoded cap")
+        except Exception as e:
+            logger.warning(f"[RISK] Dynamic base failed ({e}) - falling back to MAX_RISK ${MAX_RISK:,}")
+        adapted = adapt_params(market_ctx, {"MAX_RISK": dynamic_base} if dynamic_base else None)
         strat_logger.set_market_context(market_ctx)
         if market_ctx and earnings_map:
             market_ctx.decision_factors["earnings_count"] = len(earnings_map)

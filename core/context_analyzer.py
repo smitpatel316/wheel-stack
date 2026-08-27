@@ -435,9 +435,14 @@ def adapt_params(ctx: MarketContext, base_params: Dict = None) -> Dict[str, Any]
     Returns overrides.
 
     v2.1: MAX_RISK 90k base (was 75k), rolling 0.03 not 0.05, spread filters.
+    v2.7: base_max comes from base_params["MAX_RISK"] when provided — the
+    engine passes the account's real deployable liquidity (cash + treasury
+    ETF value - buffer), so the cap tracks account size instead of a hard
+    constant. Regime scaling (60% bear, 50% extreme IV) applies to that
+    dynamic base. 90k remains the fallback when no base is given.
     """
     overrides = {}
-    base_max = 90000
+    base_max = int((base_params or {}).get("MAX_RISK") or 90000)
     if ctx.market_regime == "bear" or ctx.vix_level in ("high", "extreme"):
         overrides.update({
             "DELTA_MAX": 0.25,

@@ -26,6 +26,9 @@
 # Closes remaining gaps: earnings 503 fallback, dividend ex-dates, fundamentals P/E<25 Debt/Eq<0.7, IV Rank adaptive, limit mid-price
 # 90k diversified 25 tickers, roller 3% OTM, spread $0.15/12% NTM $0.05, VIX Yahoo v8 real 15.6, Alpha Vantage 131 tools
 
+# v2.7: MAX_RISK is now the FALLBACK cap. The live cap is dynamic: total
+# liquid capital deployable into CSPs without margin (cash + treasury ETF
+# value - SGOV_CASH_BUFFER), scaled by market regime in context_analyzer.
 MAX_RISK = 90_000
 DELTA_MIN = 0.18
 DELTA_MAX = 0.35  # adaptive via IV rank: 0.20 when VIX>25 or IVRank>50
