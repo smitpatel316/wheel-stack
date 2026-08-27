@@ -114,7 +114,7 @@ CLOSER_LIVE_FEE_PER_CONTRACT = 0.65
 # (sync_sgov_real, _prefund_queue_with_sgov, place_sgov_limit_order) hangs
 # off this flag so the whole mechanism can be deleted in one pass at the
 # Robinhood cutover. Set False BEFORE going live at Robinhood.
-SGOV_ENABLED = True
+SGOV_ENABLED = False  # disabled 2026-08-27 per Smit: clean cash-only week before real money
 SGOV_YIELD_APY = 0.0522  # 5.22% APY
 SGOV_YIELD_MONTHLY = 0.0043  # ~0.43% monthly div
 SGOV_CASH_BUFFER = 500  # keep $500 cash buffer not swept
