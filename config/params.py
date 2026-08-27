@@ -135,3 +135,105 @@ RH_WHEEL_SUPPORTED = False  # False until place_option_order sell_to_open verifi
 # Real P/L = sum(sell_short premiums) - sum(buy_close) - fees, from Alpaca activities
 PNL_TRACKER_ENABLED = True
 PNL_DISCREPANCY_THRESHOLD = 50.0  # alert if Optionable vs Alpaca real diff >$50
+
+# ---------------------------------------------------------------------------
+# v2.8 — Environment overrides. Every live-relevant knob can be set from the
+# process environment (or the repo-root .env, which is loaded here) and the
+# env value ALWAYS wins over the defaults above. This is what lets a Ladder
+# phase deployment run from a single env file with no source edits:
+#   MAX_RISK / MIN_PREMIUM / SCORE_MIN / SGOV_ENABLED / WATCHLIST / ...
+# Broker credentials are already env-only (config/credentials.py).
+# ---------------------------------------------------------------------------
+import os as _os
+import logging as _logging
+from pathlib import Path as _Path
+
+_logger = _logging.getLogger(__name__)
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    # No override: real environment variables beat .env file entries.
+    _load_dotenv(_Path(__file__).resolve().parent.parent / ".env")
+except Exception as _e:
+    _logger.debug("[SWALLOWED] dotenv unavailable or .env unreadable, continuing with process env only: %r", _e)
+
+
+def _env_str(name, current):
+    v = _os.getenv(name)
+    return current if v is None or v == "" else v
+
+
+def _env_bool(name, current):
+    v = _os.getenv(name)
+    if v is None or v == "":
+        return current
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name, current):
+    v = _os.getenv(name)
+    if v is None or v == "":
+        return current
+    try:
+        return float(v)
+    except ValueError as _e:
+        _logger.warning("[SWALLOWED] env %s=%r is not a number, keeping default %r: %r", name, v, current, _e)
+        return current
+
+
+def _env_int(name, current):
+    v = _os.getenv(name)
+    if v is None or v == "":
+        return current
+    try:
+        return int(float(v))
+    except ValueError as _e:
+        _logger.warning("[SWALLOWED] env %s=%r is not an integer, keeping default %r: %r", name, v, current, _e)
+        return current
+
+
+# Risk / entry thresholds (Ladder phases tune these)
+MAX_RISK = _env_float("MAX_RISK", MAX_RISK)
+MIN_PREMIUM = _env_float("MIN_PREMIUM", MIN_PREMIUM)
+SCORE_MIN = _env_float("SCORE_MIN", SCORE_MIN)
+DELTA_MIN = _env_float("DELTA_MIN", DELTA_MIN)
+DELTA_MAX = _env_float("DELTA_MAX", DELTA_MAX)
+YIELD_MIN = _env_float("YIELD_MIN", YIELD_MIN)
+YIELD_MAX = _env_float("YIELD_MAX", YIELD_MAX)
+EXPIRATION_MIN = _env_int("EXPIRATION_MIN", EXPIRATION_MIN)
+EXPIRATION_MAX = _env_int("EXPIRATION_MAX", EXPIRATION_MAX)
+OPEN_INTEREST_MIN = _env_int("OPEN_INTEREST_MIN", OPEN_INTEREST_MIN)
+
+# Feature switches
+SGOV_ENABLED = _env_bool("SGOV_ENABLED", SGOV_ENABLED)
+EARNINGS_ENABLED = _env_bool("EARNINGS_ENABLED", EARNINGS_ENABLED)
+DIVIDEND_ENABLED = _env_bool("DIVIDEND_ENABLED", DIVIDEND_ENABLED)
+FUNDAMENTALS_ENABLED = _env_bool("FUNDAMENTALS_ENABLED", FUNDAMENTALS_ENABLED)
+GROWTH_BLOCK_ENABLED = _env_bool("GROWTH_BLOCK_ENABLED", GROWTH_BLOCK_ENABLED)
+IV_RANK_ENABLED = _env_bool("IV_RANK_ENABLED", IV_RANK_ENABLED)
+LIMIT_ORDER_ENABLED = _env_bool("LIMIT_ORDER_ENABLED", LIMIT_ORDER_ENABLED)
+RH_MCP_ENABLED = _env_bool("RH_MCP_ENABLED", RH_MCP_ENABLED)
+PNL_TRACKER_ENABLED = _env_bool("PNL_TRACKER_ENABLED", PNL_TRACKER_ENABLED)
+
+SGOV_CASH_BUFFER = _env_float("SGOV_CASH_BUFFER", SGOV_CASH_BUFFER)
+SGOV_TARGET_PCT = _env_float("SGOV_TARGET_PCT", SGOV_TARGET_PCT)
+
+
+def load_watchlist(symbols_file=None):
+    """Return the wheel watchlist.
+
+    The WATCHLIST env var (comma-separated tickers, e.g. "F" for Ladder
+    Phase 1) wins over config/symbol_list.txt. Returns an uppercased list.
+    """
+    env = _os.getenv("WATCHLIST", "").strip()
+    if env:
+        syms = [s.strip().upper() for s in env.split(",") if s.strip()]
+        return list(dict.fromkeys(syms))  # dedupe, keep order
+    path = _Path(symbols_file) if symbols_file else _Path(__file__).resolve().parent / "symbol_list.txt"
+    with open(path, "r") as f:
+        return [line.strip().upper() for line in f if line.strip()]
+
+
+def watchlist_source():
+    """Where the watchlist came from: 'env:WATCHLIST' or the file path."""
+    return "env:WATCHLIST" if _os.getenv("WATCHLIST", "").strip() else "config/symbol_list.txt"

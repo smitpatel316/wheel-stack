@@ -67,6 +67,7 @@ cd wheel-stack
 That's it — the wheel is running. Useful commands:
 
 ```bash
+./wheel doctor         # pre-flight health check: broker, config, dashboard, data feeds
 ./wheel status         # what's up, health checks
 ./wheel run            # one strategy cycle right now, in the foreground
 ./wheel stop           # stop webhook + dashboard
@@ -76,6 +77,10 @@ That's it — the wheel is running. Useful commands:
 `./wheel` is a single dependency-free bash script — read it before you run it if you like. The dashboard is optional: it looks for an [Optionable](https://github.com/yomikoye/optionable) checkout next to this repo, or point `OPTIONABLE_DIR` at one. The engine itself is cron-driven (not a daemon), so `start` only covers the always-on pieces.
 
 Prefer to do it by hand? The steps the script runs are: `python3 -m venv .venv && .venv/bin/pip install -e .`, `cp config/.env.example .env` (fill in Alpaca paper, Finnhub, and Alpha Vantage keys — all have free tiers), then `PYTHONPATH=. .venv/bin/python scripts/run_strategy.py` for one cycle. Run the tests with `.venv/bin/python -m pytest tests/ -q`.
+
+## Configuration
+
+Every live-relevant knob in `config/params.py` can be overridden from the environment or `.env` — the env value always wins, so a deployment needs only an env file, never a source edit: `MAX_RISK`, `MIN_PREMIUM`, `SCORE_MIN`, `WATCHLIST` (comma-separated, replaces `config/symbol_list.txt`), `SGOV_ENABLED`, `IS_PAPER`, broker/data-feed keys, and the feature switches (`EARNINGS_ENABLED`, `FUNDAMENTALS_ENABLED`, …). See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full table, cold-start procedure, post-reboot checks, and the go-live checklist.
 
 ## Resource usage
 

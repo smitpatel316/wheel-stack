@@ -3,7 +3,7 @@ from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
 from core.state_manager import update_state, calculate_risk, calculate_exposures, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
-from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER
+from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
 from app_logging.strategy_logger import StrategyLogger
 from app_logging.logger_setup import setup_logger
 from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, sync_closed_trades
@@ -201,8 +201,8 @@ def main():
     dash_push.install()
 
     SYMBOLS_FILE = Path(__file__).parent.parent / "config" / "symbol_list.txt"
-    with open(SYMBOLS_FILE, 'r') as file:
-        SYMBOLS = [line.strip() for line in file.readlines()]
+    SYMBOLS = load_watchlist(SYMBOLS_FILE)
+    logger.info(f"[CONFIG] Watchlist ({watchlist_source()}): {', '.join(SYMBOLS)}")
 
     client = BrokerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY, paper=IS_PAPER)
 

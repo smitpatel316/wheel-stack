@@ -6,6 +6,7 @@
 #   ./wheel stop           stop everything start launched
 #   ./wheel status         show what's running and healthy
 #   ./wheel run            run one strategy cycle right now (foreground)
+#   ./wheel doctor         pre-flight health check (broker, config, dashboard, data feeds)
 #   ./wheel cron-install   install the 3x-per-market-day engine schedule
 #   ./wheel cron-remove    remove the engine schedule
 #
@@ -154,6 +155,11 @@ cmd_run() {
   PYTHONPATH="$ROOT" "$PY" scripts/run_strategy.py --strat-log --log-level INFO 2>&1 | tee -a "$LOGS/run-manual.log"
 }
 
+cmd_doctor() {
+  [ -f .env ] || die "no .env — run ./wheel setup first"
+  PYTHONPATH="$ROOT" "$PY" scripts/doctor.py
+}
+
 CRON_MARK="# wheel-stack engine"
 cmd_cron_install() {
   local block
@@ -180,6 +186,7 @@ case "${1:-}" in
   stop)         cmd_stop ;;
   status)       cmd_status ;;
   run)          cmd_run ;;
+  doctor)       cmd_doctor ;;
   cron-install) cmd_cron_install ;;
   cron-remove)  cmd_cron_remove ;;
   *)            grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20 ;;
