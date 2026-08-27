@@ -37,6 +37,10 @@ environment or `.env` — no source edits, ever, for a deployment:
 | `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | — | broker credentials (env only, never in git) |
 | `FINNHUB_API_KEY` / `ALPHA_VANTAGE_API_KEY` | — | fundamentals data (each is the other's fallback) |
 | `OPTIONABLE_URL` | http://localhost:8096 | dashboard sync target |
+| `EARNINGS_SOURCE_URL` | unset (off) | base URL of the Finnhub webhook receiver (e.g. `http://<pi-host>:8744`); when set, each run pulls its invalidation state (see Fail-open sync) |
+| `SYNC_OUTBOX_DIR` | `state/sync-outbox/` | durable outbox for dashboard-bound payloads |
+| `SYNC_PUSH_TIMEOUT` | 5 | seconds; outbox delivery timeout |
+| `EARNINGS_SOURCE_TIMEOUT` | 5 | seconds; earnings-state pull timeout |
 
 Also overridable: `DELTA_MIN/MAX`, `YIELD_MIN/MAX`, `EXPIRATION_MIN/MAX`,
 `OPEN_INTEREST_MIN`, and the feature switches (`EARNINGS_ENABLED`,
@@ -63,6 +67,52 @@ Also overridable: `DELTA_MIN/MAX`, `YIELD_MIN/MAX`, `EXPIRATION_MIN/MAX`,
 3. Check the last engine run in `logs/cron.log` actually completed (look for
    the run summary, not just a start line).
 4. The engine itself is cron-driven, not a daemon — nothing else to restart.
+
+## Fail-open sync (engine host ↔ dashboard host)
+
+Canonical state is the engine journal (`logs/`, `state/`) plus the Alpaca
+broker. The Optionable dashboard is only a replica. **If the dashboard host
+(Pi) is down, runs proceed normally — nothing halts and no trade record is
+lost.** The two mechanisms:
+
+**Sync outbox** (`core/sync_outbox.py`)
+- Every trade record the engine sends to Optionable is written FIRST to
+  `state/sync-outbox/` — one JSON file per payload, atomic tmp+rename, with a
+  stable `syncId` embedded in the trade's `notes` — and only then pushed to
+  `OPTIONABLE_URL` with a ≤5s timeout. A failed push stays queued; the push
+  can never raise into the engine.
+- Draining: each engine run drains the outbox at start, and again after a
+  successful end-of-run sync, oldest-first. An item is deleted only after a
+  2xx ack, a duplicate-style 400/409, or proof the receiver already has it
+  (`syncId` in notes, or ticker/strike/expiry/type tuple match) — so
+  re-delivery after a crash never double-records. If the dashboard is
+  unreachable the drain aborts after the first failure and retries next run.
+- Inspect: `ls state/sync-outbox/` (one file per pending payload, `cat` to
+  read it). Replay: just `./wheel run` with the dashboard up. Corrupt items
+  are quarantined to `*.bad`. Deleting a file drops that payload from the
+  dashboard only — the engine journal still has the trade.
+- Log lines: `grep '\[SYNC\]' logs/cron.log`.
+- Deliberately NOT outboxed: the end-of-run reconciliation syncs (equity,
+  closed trades, activities) and per-run dashboard telemetry — they are
+  recomputed from broker state every run, so they self-heal, and replaying a
+  stale snapshot would corrupt the dashboard's current view.
+
+**Earnings pull** (`core/earnings_source.py`)
+- With `EARNINGS_SOURCE_URL` set, each run starts by GETting
+  `<url>/earnings/state` (≤5s). If the webhook receiver has seen a newer
+  Finnhub event than the local cache, the local cache is cleared so the run
+  refetches from Finnhub; the applied marker lives in
+  `state/earnings-source-state.json`.
+- On ANY failure (unreachable, timeout, non-2xx, bad JSON) the run logs a
+  grep-able `[EARNINGS-SOURCE]` WARNING and continues with exactly the old
+  behavior: fresh cache → 48h stale cache → `state/earnings-last-good.json`
+  snapshot (new: survives >48h outages) → Alpha Vantage fallback. With the
+  env var unset it is a complete no-op.
+- The webhook receiver (`scripts/webhook_server.py`) serves
+  `/earnings/state` and takes its port from `WEBHOOK_PORT` — default 8644
+  unchanged; run the Pi copy with `WEBHOOK_PORT=8744`. Its local cache-clear
+  on each event is unchanged (only relevant when engine and receiver share a
+  host).
 
 ## Go-live checklist (Ladder Phase 1)
 

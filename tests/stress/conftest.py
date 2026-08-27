@@ -9,6 +9,12 @@ trades (AAA, CHP, AMD, BBB x2, F CC) into the live dashboard this way.
 
 Every network-facing function in core.optionable_sync calls alive() first, so
 patching alive() to False disables all outbound Optionable traffic suite-wide.
+
+2026-08-27 (fail-open outbox): push_trade_to_optionable now writes to a
+durable local outbox BEFORE the alive() gate, so the outbox dir itself must
+also be redirected to tmp_path, and the earnings last-good snapshot +
+earnings-source pull must stay out of the repo's real state/ and off the
+network.
 """
 
 import pytest
@@ -20,6 +26,16 @@ def _no_optionable_network(monkeypatch):
 
     monkeypatch.setattr(osync, "alive", lambda: False)
     monkeypatch.setattr(osync, "OPTIONABLE_URL", "http://127.0.0.1:9")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_sync_state(monkeypatch, tmp_path):
+    """Fail-open sync artifacts (outbox, earnings snapshot/source) stay in tmp."""
+    monkeypatch.setenv("SYNC_OUTBOX_DIR", str(tmp_path / "sync-outbox"))
+    monkeypatch.delenv("EARNINGS_SOURCE_URL", raising=False)
+    import core.earnings_calendar as ec
+
+    monkeypatch.setattr(ec, "LAST_GOOD_FILE", tmp_path / "earnings-last-good.json")
 
 
 @pytest.fixture(autouse=True)

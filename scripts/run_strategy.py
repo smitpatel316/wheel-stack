@@ -200,6 +200,21 @@ def main():
     dash_push = EngineDashboardPush()
     dash_push.install()
 
+    # Fail-open sync (Pi migration 2026-08-27): replay any Optionable payloads
+    # queued in the local outbox while the dashboard was unreachable. Gated on
+    # alive() so a down dashboard costs nothing extra; drain can never raise.
+    try:
+        from core.sync_outbox import drain_outbox as _drain_outbox, outbox_pending as _outbox_pending
+        _pending = _outbox_pending()
+        if _pending:
+            if optionable_alive():
+                _drain_outbox()
+            else:
+                logger.warning(f"[SYNC] {_pending} Optionable payload(s) held in local outbox, "
+                               f"dashboard unreachable - will retry next run (fail-open, run unaffected)")
+    except Exception as e:
+        logger.warning("[SWALLOWED] outbox drain at run start failed (continuing): %r", e)
+
     SYMBOLS_FILE = Path(__file__).parent.parent / "config" / "symbol_list.txt"
     SYMBOLS = load_watchlist(SYMBOLS_FILE)
     logger.info(f"[CONFIG] Watchlist ({watchlist_source()}): {', '.join(SYMBOLS)}")
@@ -254,6 +269,15 @@ def main():
     try:
         if EARNINGS_ENABLED:
             logger.info(f"[EARNINGS] Fetching earnings calendar {len(SYMBOLS)} symbols next {EARNINGS_CACHE_DAYS}d (Finnhub primary + 503 retain + Alpha fallback)")
+            # Pi migration: the Finnhub webhook receiver now lives off-host, so
+            # its cache-invalidation signals no longer land here. Pull its state
+            # (<=5s, fail-open): clears the local cache only if the receiver saw
+            # a newer Finnhub event; any failure keeps today's cache behavior.
+            try:
+                from core.earnings_source import sync_from_source as _earn_src_sync
+                _earn_src_sync()
+            except Exception as e:
+                logger.warning("[SWALLOWED] earnings-source pull failed (continuing with local cache): %r", e)
             earnings_report = get_earnings_risk_report(SYMBOLS, block_days=EARNINGS_BLOCK_DAYS, days_ahead=EARNINGS_CACHE_DAYS, dte_default=EARNINGS_BLOCK_DTE)
             from datetime import datetime
             for sym, info in earnings_report.items():
@@ -810,11 +834,24 @@ def main():
                 sync_option_events(client)
             except Exception as e:
                 logger.debug(f"activities sync failed: {e}")
+            # Dashboard confirmed up: deliver any outbox backlog too.
+            try:
+                from core.sync_outbox import drain_outbox as _drain_outbox_eod
+                _drain_outbox_eod()
+            except Exception as e:
+                logger.warning("[SWALLOWED] outbox drain after end-of-run sync failed: %r", e)
             logger.info(f"Synced positions to Optionable tracker ({len(client.get_positions())} Alpaca positions)")
         except Exception as e:
             logger.warning(f"Optionable sync failed: {e}")
     else:
-        logger.warning("Optionable not reachable")
+        try:
+            from core.sync_outbox import outbox_pending as _ob_pending
+            _obp = _ob_pending()
+        except Exception as e:
+            logger.debug("[SWALLOWED] outbox pending count for unreachable-log failed: %r", e)
+            _obp = 0
+        logger.warning("Optionable not reachable" +
+                       (f" - {_obp} payload(s) held in local outbox, will retry next run" if _obp else ""))
 
     try:
         strat_logger.save()

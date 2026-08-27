@@ -15,6 +15,42 @@ CACHE_FILE = LOG_DIR / "earnings_cache.json"
 CACHE_TTL = 6*3600
 CACHE_STALE_OK = 48*3600  # accept stale 48h if Finnhub 503
 
+# Last-good snapshot (Pi migration, 2026-08-27): a copy of the most recent
+# non-empty earnings cache, written atomically alongside every cache write.
+# When the primary cache is missing OR older than CACHE_STALE_OK (e.g. a
+# multi-day outage), load_old_cache falls back to this snapshot before
+# giving up — entries self-filter by date, so an old-but-valid snapshot is
+# strictly better than nothing. No TTL; age is logged loudly on use.
+LAST_GOOD_FILE = Path(__file__).parent.parent / "state" / "earnings-last-good.json"
+
+
+def _load_last_good(symbols: List[str]) -> Dict[str, date]:
+    """Load the last-good snapshot regardless of age. Returns {} if absent."""
+    if not LAST_GOOD_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(LAST_GOOD_FILE.read_text())
+        age_h = (time.time() - float(raw.get("_timestamp", 0))) / 3600.0
+        out: Dict[str, date] = {}
+        for entry in raw.get("earningsCalendar", []):
+            sym = entry.get("symbol", "").upper()
+            d_str = entry.get("date", "")
+            if sym in set(s.upper() for s in symbols):
+                try:
+                    d = datetime.fromisoformat(d_str).date()
+                    if (d - date.today()).days >= -2:  # self-filter past dates
+                        out[sym] = d
+                except Exception as e:
+                    logger.debug("[SWALLOWED] parsing last-good earnings date for %s: %r", sym, e)
+        if out:
+            logger.warning("[EARNINGS] Using LAST-GOOD snapshot (%d symbols, age %.1fh) - "
+                           "primary cache missing/too stale", len(out), age_h)
+            print(f"[EARNINGS] Using last-good snapshot {len(out)} symbols age {age_h:.1f}h (cache missing/stale)")
+        return out
+    except Exception as e:
+        logger.debug("[SWALLOWED] loading last-good earnings snapshot %s: %r", LAST_GOOD_FILE, e)
+        return {}
+
 def get_api_key():
     try:
         from config.credentials import FINNHUB_API_KEY
@@ -107,17 +143,17 @@ def fetch_earnings_calendar_alpha(symbols: List[str]) -> Dict[str, date]:
         return {}
 
 def load_old_cache(symbols: List[str]) -> Dict[str, date]:
-    """Load old cache even if stale, up to 48h"""
+    """Load old cache even if stale, up to 48h; then the last-good snapshot."""
     cached = {}
     if not CACHE_FILE.exists():
-        return cached
+        return _load_last_good(symbols)
     try:
         raw = json.loads(CACHE_FILE.read_text())
         cached_time = raw.get("_timestamp", 0)
         age = time.time() - cached_time
         if age > CACHE_STALE_OK:
             print(f"[EARNINGS] Cache too stale {age/3600:.1f}h > 48h, ignoring")
-            return cached
+            return _load_last_good(symbols)
         for entry in raw.get("earningsCalendar", []):
             sym = entry.get("symbol", "").upper()
             d_str = entry.get("date", "")
@@ -135,7 +171,7 @@ def load_old_cache(symbols: List[str]) -> Dict[str, date]:
     except Exception as e:
         logger.debug("[SWALLOWED] loading stale earnings cache %s: %r", CACHE_FILE, e)
         print(f"[EARNINGS] Old cache load failed: {e}")
-    return cached
+    return cached if cached else _load_last_good(symbols)
 
 def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
     today = date.today()
@@ -216,17 +252,26 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
 
     # Always write cache if we have data, otherwise keep old file
     if earnings_map:
+        cache_doc = {
+            "_timestamp": time.time(),
+            "_from": today.isoformat(),
+            "_to": future.isoformat(),
+            "earningsCalendar": [{"symbol": k, "date": v.isoformat()} for k,v in earnings_map.items()]
+        }
         try:
             LOG_DIR.mkdir(exist_ok=True)
-            CACHE_FILE.write_text(json.dumps({
-                "_timestamp": time.time(),
-                "_from": today.isoformat(),
-                "_to": future.isoformat(),
-                "earningsCalendar": [{"symbol": k, "date": v.isoformat()} for k,v in earnings_map.items()]
-            }, indent=2))
+            CACHE_FILE.write_text(json.dumps(cache_doc, indent=2))
         except Exception as e:
             logger.debug("[SWALLOWED] writing earnings cache %s: %r", CACHE_FILE, e)
             print(f"[EARNINGS] Cache write failed: {e}")
+        # Last-good snapshot (atomic tmp+rename): survives >48h outages.
+        try:
+            LAST_GOOD_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _tmp = LAST_GOOD_FILE.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(cache_doc, indent=2))
+            os.replace(_tmp, LAST_GOOD_FILE)
+        except Exception as e:
+            logger.debug("[SWALLOWED] writing earnings last-good snapshot %s: %r", LAST_GOOD_FILE, e)
     else:
         # If we have old cache file, touch it to keep mtime?
         if old_cache and CACHE_FILE.exists():

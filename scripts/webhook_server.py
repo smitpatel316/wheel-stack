@@ -3,10 +3,21 @@
 
 Behavior (from config/webhook_config.json + docs/deployment.md):
 - GET  /health                      -> {"status":"ok","platform":"webhook"}
+- GET  /earnings/state              -> invalidation state for the engine's
+                                       fail-open earnings pull (core/earnings_source.py):
+                                       {"last_invalidation": <epoch|null>,
+                                        "last_event_at": <iso|null>,
+                                        "events_received": <n>}
 - POST /webhooks/finnhub-earnings   -> validates X-Finnhub-Secret, logs event to
-                                       logs/webhook_events.jsonl, clears the earnings
-                                       cache so the next strategy run refetches.
+                                       logs/webhook_events.jsonl, records the
+                                       invalidation in logs/webhook_state.json
+                                       (atomic), clears the earnings cache so
+                                       the next strategy run refetches.
 - Secret comes from FINNHUB_WEBHOOK_SECRET env, falling back to config/webhook_config.json.
+- Listen port comes from WEBHOOK_PORT (default 8644; the Pi copy runs with 8744).
+- The local earnings-cache clear only matters when the engine runs on this
+  same host; on the Pi it is harmless and the /earnings/state endpoint is
+  what the Hatch engine actually consumes.
 """
 import hmac
 import json
@@ -32,7 +43,36 @@ except ImportError as e:
 LOGS = ROOT / "logs"
 EVENTS_LOG = LOGS / "webhook_events.jsonl"
 EARNINGS_CACHE = LOGS / "earnings_cache.json"
+STATE_FILE = LOGS / "webhook_state.json"
 PORT = int(os.environ.get("WEBHOOK_PORT", "8644"))
+
+
+def load_state() -> dict:
+    """Invalidation state served to the engine's earnings pull. Never raises."""
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        if isinstance(state, dict):
+            return {
+                "last_invalidation": state.get("last_invalidation"),
+                "last_event_at": state.get("last_event_at"),
+                "events_received": int(state.get("events_received") or 0),
+            }
+    except Exception as e:
+        log.debug("[SWALLOWED] webhook state read failed (serving empty state): %r", e)
+    return {"last_invalidation": None, "last_event_at": None, "events_received": 0}
+
+
+def record_event() -> dict:
+    """Record a Finnhub push event as a cache invalidation (atomic write)."""
+    state = load_state()
+    now = time.time()
+    state["last_invalidation"] = now
+    state["last_event_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    state["events_received"] = int(state.get("events_received") or 0) + 1
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(tmp, STATE_FILE)
+    return state
 
 # Robinhood Agentic Trading MCP OAuth callback (read-only connector project).
 # The /oauth/robinhood/callback path is routed here via a
@@ -74,6 +114,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._json(200, {"status": "ok", "platform": "webhook"})
+        elif urlsplit(self.path).path == "/earnings/state":
+            self._json(200, load_state())
         elif urlsplit(self.path).path == "/oauth/robinhood/callback":
             self._rh_oauth_callback(parse_qs(urlsplit(self.path).query))
         else:
@@ -151,11 +193,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with EVENTS_LOG.open("a") as f:
                 f.write(json.dumps(event) + "\n")
 
+            # Record the invalidation for the engine's pull (works whether the
+            # engine is local or, post-migration, pulling over the network).
+            record_event()
+
             # Clear the earnings cache so the next strategy run refetches fresh dates.
             if EARNINGS_CACHE.exists():
                 EARNINGS_CACHE.unlink()
         except Exception as e:
-            log.warning("[SWALLOWED] webhook post-ack processing (event log/cache clear) failed: %r", e)
+            log.warning("[SWALLOWED] webhook post-ack processing (event log/state/cache clear) failed: %r", e)
             print(f"post-ack processing error: {e}", flush=True)
 
     def log_message(self, fmt, *args):
@@ -163,7 +209,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}", flush=True)
 
 
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-with socketserver.ThreadingTCPServer(("", PORT), Handler) as srv:
-    print(f"webhook receiver listening on :{PORT}", flush=True)
-    srv.serve_forever()
+if __name__ == "__main__":
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    with socketserver.ThreadingTCPServer(("", PORT), Handler) as srv:
+        print(f"webhook receiver listening on :{PORT}", flush=True)
+        srv.serve_forever()

@@ -19,6 +19,14 @@ Fixes v2.5.4 2026-08-04:
   corrects Optionable closePrice.
 - push_trade_to_optionable now handles commission properly, idempotent dup check, stores
   notes with OCC for traceability.
+
+Fail-open outbox (2026-08-27, Pi migration):
+- push_trade_to_optionable writes every trade payload to a durable local outbox
+  (core/sync_outbox.py, state/sync-outbox/) BEFORE any network attempt, with a
+  stable syncId in notes so re-delivery after a crash cannot double-record.
+  If Optionable is unreachable the payload stays queued and a later run's
+  outbox drain delivers it. The engine journal + Alpaca remain canonical;
+  the dashboard is only a replica, so its outage can never halt a run.
 """
 import datetime, logging, re, os, sys, math, time
 from typing import Optional, Tuple, List, Dict, Union
@@ -231,10 +239,14 @@ def push_trade_to_optionable(
     """
     v2.5.4 improved: proper commission handling, idempotent duplicate check,
     store OCC in notes for traceability if API supports, better logging.
+
+    Fail-open (2026-08-27, Pi migration): the payload lands in the durable
+    local outbox (core/sync_outbox.py) FIRST, carrying a stable syncId in
+    notes; then the outbox drains (delivering any backlog oldest-first plus
+    this payload). If Optionable is unreachable the trade stays queued and a
+    later run delivers it — the engine journal + Alpaca are canonical, the
+    dashboard is only a replica. Never raises into the engine.
     """
-    if not alive():
-        logger.debug("Optionable not alive, skip push")
-        return False
     parsed = _parse_occ(alpaca_occ_symbol)
     if not parsed:
         return False
@@ -253,6 +265,9 @@ def push_trade_to_optionable(
 
     # Optionable expects delta 0-1, Alpaca gives -0.3 for puts -> abs()
     delta_val = abs(float(delta)) if delta is not None else None
+
+    from core.sync_outbox import make_trade_sync_id, enqueue_trade, drain_outbox, is_queued
+    sync_id = make_trade_sync_id(alpaca_occ_symbol, opened_date)
     payload = {
         "ticker": underlying,
         "type": trade_type,
@@ -267,41 +282,29 @@ def push_trade_to_optionable(
         "status": "Open",
         "accountId": account_id,
         "commission": comm,
-        "notes": f"OCC:{alpaca_occ_symbol} via wheel-stack v2.5.4",
+        "notes": f"OCC:{alpaca_occ_symbol} syncId:{sync_id} via wheel-stack v2.5.4",
     }
     if payload["delta"] is None:
         del payload["delta"]
 
-    try:
-        # Idempotent: if open trade with same ticker/strike/exp/type exists, skip
-        open_trades = get_optionable_open_trades(account_id)
-        for t in open_trades:
-            try:
-                same_ticker = t.get('ticker') == underlying
-                same_strike = abs(float(t.get('strike',0)) - strike) < 0.001
-                same_exp = t.get('expirationDate') == exp_date
-                same_type = t.get('type') == trade_type
-                if same_ticker and same_strike and same_exp and same_type:
-                    # Update if entry price differs significantly? For idempotency keep first
-                    logger.info(f"Optionable: {underlying} {trade_type} ${strike} {exp_date} already open id={t['id']} (idempotent skip)")
-                    return True
-            except Exception as e:
-                logger.warning("[SWALLOWED] idempotent duplicate-check compare for %s %s %s: %r", underlying, trade_type, exp_date, e)
-                continue
+    # Durable FIRST: even a crash between fill and push loses nothing.
+    # The outbox drain does the same dup check the old inline code did
+    # (syncId in notes, or ticker/strike/expiry/type tuple match) before POSTing.
+    enqueue_trade(payload, sync_id)
 
-        r = requests.post(f"{OPTIONABLE_URL}/api/trades", json=payload, timeout=TIMEOUT)
-        if r.status_code in (200,201):
-            logger.info(f"Optionable: logged {trade_type} {underlying} ${strike} exp {exp_date} ${bid_per_share:.2f}x{contracts} comm ${comm:.2f}")
-            return True
-        txt = r.text[:800]
-        if r.status_code in (409, 400) and ("already" in txt.lower() or "duplicate" in txt.lower() or "exists" in txt.lower()):
-            logger.info(f"Optionable: {underlying} {trade_type} {exp_date} already exists (409)")
-            return True
-        logger.warning(f"Optionable POST failed {r.status_code}: {txt}")
+    if not alive():
+        logger.warning(
+            f"[SYNC] Optionable unreachable - {trade_type} {underlying} ${strike} {exp_date} "
+            f"queued in local outbox (id {sync_id[:8]}); a later run will deliver it. "
+            f"Engine journal + Alpaca remain canonical.")
         return False
-    except Exception as e:
-        logger.warning(f"Optionable POST exception: {e}")
+    drain_outbox()
+    if is_queued(sync_id):
+        logger.warning(f"[SYNC] Optionable push not acknowledged - {trade_type} {underlying} "
+                       f"${strike} {exp_date} remains queued (id {sync_id[:8]}), will retry next run")
         return False
+    logger.info(f"Optionable: logged {trade_type} {underlying} ${strike} exp {exp_date} ${bid_per_share:.2f}x{contracts} comm ${comm:.2f}")
+    return True
 
 def sync_alpaca_equity_to_optionable(client):
     """Sync equity longs (excluding treasuries) as manual stocks - idempotent"""
