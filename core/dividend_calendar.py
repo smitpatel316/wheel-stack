@@ -31,6 +31,24 @@ def get_finnhub_key():
         logger.debug("[SWALLOWED] loading FINNHUB_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("FINNHUB_API_KEY") or ""
 
+# Per-process Alpha dividend failure tracking: during a total outage (Hatch
+# egress proxy drops, seen daily since 2026-08-25) every symbol x both
+# endpoints logs a near-identical multi-line ProxyError at WARNING (~30+
+# lines/run). Keep the first failure at WARNING with full detail, demote
+# repeats to DEBUG, and emit one summary WARNING from build_cache.
+# Fetch behavior (endpoints tried, order, fallbacks) is unchanged.
+_ALPHA_DIV_FAIL_COUNT = 0
+_ALPHA_DIV_FAIL_SYMS = set()
+_ALPHA_DIV_SUMMARIZED = False
+
+def _note_alpha_div_failure(symbol: str) -> bool:
+    """Register an Alpha dividend fetch failure; True only for the first
+    failure of the run (caller logs that one at WARNING, repeats at DEBUG)."""
+    global _ALPHA_DIV_FAIL_COUNT
+    _ALPHA_DIV_FAIL_COUNT += 1
+    _ALPHA_DIV_FAIL_SYMS.add(symbol.upper())
+    return _ALPHA_DIV_FAIL_COUNT == 1
+
 def fetch_dividends_alpha(symbol: str) -> List[Dict]:
     key = get_alpha_key()
     if not key:
@@ -54,7 +72,10 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
                 pass
     except Exception as e:
         msg = repr(e).replace(key, "***") if key else repr(e)
-        logger.warning("[SWALLOWED] Alpha OVERVIEW dividend fetch failed for %s, falling back to DIVIDENDS endpoint: %s", symbol, msg)
+        if _note_alpha_div_failure(symbol):
+            logger.warning("[SWALLOWED] Alpha OVERVIEW dividend fetch failed for %s, falling back to DIVIDENDS endpoint: %s", symbol, msg)
+        else:
+            logger.debug("[SWALLOWED] Alpha OVERVIEW fetch failed for %s (failure #%d this run, repeat - detail at first failure): %s", symbol, _ALPHA_DIV_FAIL_COUNT, msg)
         pass
 
     # Fallback to DIVIDENDS endpoint
@@ -73,7 +94,10 @@ def fetch_dividends_alpha(symbol: str) -> List[Dict]:
         return result
     except Exception as e:
         msg = repr(e).replace(key, "***") if key else repr(e)
-        logger.warning("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s: %s", symbol, msg)
+        if _note_alpha_div_failure(symbol):
+            logger.warning("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s: %s", symbol, msg)
+        else:
+            logger.debug("[SWALLOWED] Alpha DIVIDENDS fetch failed for %s (failure #%d this run, repeat - detail at first failure): %s", symbol, _ALPHA_DIV_FAIL_COUNT, msg)
         # print(f"[DIVIDEND] Alpha {symbol} failed: {e}")
         return []
 
@@ -175,6 +199,13 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
                     logger.debug("[SWALLOWED] parsing Finnhub dividend ex-date for %s: %r", sym, e)
                     continue
         time.sleep(0.4)
+
+    global _ALPHA_DIV_SUMMARIZED
+    if _ALPHA_DIV_FAIL_COUNT > 1 and not _ALPHA_DIV_SUMMARIZED:
+        _ALPHA_DIV_SUMMARIZED = True
+        logger.warning(
+            "[SWALLOWED] Alpha dividend fetches failed %d times across %d symbols this run - endpoint/proxy outage suspected; repeat failures logged at debug, Finnhub/cache fallbacks remain active",
+            _ALPHA_DIV_FAIL_COUNT, len(_ALPHA_DIV_FAIL_SYMS))
 
     fresh_found = bool(dividend_map)
     for k,v in stale.items():
