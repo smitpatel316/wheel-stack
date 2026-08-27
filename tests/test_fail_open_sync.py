@@ -209,12 +209,31 @@ def test_idempotent_redelivery_via_tuple_match(isolated, monkeypatch):
     sid = so.make_trade_sync_id(OCC, OPENED)
     so.enqueue_trade(_trade_payload(sync_id=sid), sid)
     existing = {"id": 9, "ticker": "F", "type": "CSP", "strike": 10.0,
-                "expirationDate": "2026-09-18", "notes": ""}
+                "expirationDate": "2026-09-18", "status": "Open", "notes": ""}
     monkeypatch.setattr(so.requests, "get", lambda *a, **k: _Resp(200, {"data": [existing]}))
     posts = []
     monkeypatch.setattr(so.requests, "request", lambda *a, **k: posts.append((a, k)))
     assert so.drain_outbox()["delivered"] == 1
     assert posts == []
+    assert _outbox_files(isolated) == []
+
+
+def test_closed_trade_with_same_tuple_does_not_block_redelivery(isolated, monkeypatch):
+    """Re-opening the same contract after it was closed must still POST: the
+    tuple dedupe applies to OPEN trades only (pre-outbox behavior), otherwise
+    a genuinely new position would never reach the dashboard."""
+    sid = so.make_trade_sync_id(OCC, "2026-08-28")  # new fill, new day
+    payload = _trade_payload(sync_id=sid)
+    payload["openedDate"] = "2026-08-28"
+    so.enqueue_trade(payload, sid)
+    closed_prior = {"id": 9, "ticker": "F", "type": "CSP", "strike": 10.0,
+                    "expirationDate": "2026-09-18", "status": "Closed", "notes": ""}
+    monkeypatch.setattr(so.requests, "get", lambda *a, **k: _Resp(200, {"data": [closed_prior]}))
+    posts = []
+    monkeypatch.setattr(so.requests, "request",
+                        lambda *a, **k: posts.append((a, k)) or _Resp(201, {"id": 10}))
+    assert so.drain_outbox()["delivered"] == 1
+    assert len(posts) == 1  # POST went through - new trade recorded
     assert _outbox_files(isolated) == []
 
 

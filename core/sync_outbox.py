@@ -165,8 +165,15 @@ def _get_all_trades(base: str, account_id: int):
 def _trade_already_recorded(trades, payload: dict, sync_id: str) -> bool:
     for t in trades:
         try:
+            # syncId is unique per fill (OCC + opened date): a match means this
+            # exact fill was already recorded, whatever its status since.
             if sync_id and sync_id in str(t.get("notes") or ""):
                 return True
+            # Tuple fallback mirrors the pre-outbox dedupe, which checked OPEN
+            # trades only. Matching a CLOSED trade here would wrongly suppress
+            # a genuinely new position on the same contract (re-open after close).
+            if str(t.get("status") or "").lower() != "open":
+                continue
             if (t.get("ticker") == payload.get("ticker")
                     and t.get("type") == payload.get("type")
                     and t.get("expirationDate") == payload.get("expirationDate")
