@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" role="img" aria-label="wheel-stack banner">
+  <defs>
+    <clipPath id="round"><rect x="0" y="0" width="1280" height="360" rx="18"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <!-- background -->
+    <rect width="1280" height="360" rx="18" fill="#111318"/>
+    <!-- subtle grid -->
+    <g stroke="#1d2129" stroke-width="1">
+      <line x1="0" y1="72"  x2="1280" y2="72"/>
+      <line x1="0" y1="144" x2="1280" y2="144"/>
+      <line x1="0" y1="216" x2="1280" y2="216"/>
+      <line x1="0" y1="288" x2="1280" y2="288"/>
+      <line x1="160" y1="0" x2="160" y2="360"/>
+      <line x1="320" y1="0" x2="320" y2="360"/>
+      <line x1="480" y1="0" x2="480" y2="360"/>
+      <line x1="640" y1="0" x2="640" y2="360"/>
+      <line x1="800" y1="0" x2="800" y2="360"/>
+      <line x1="960" y1="0" x2="960" y2="360"/>
+      <line x1="1120" y1="0" x2="1120" y2="360"/>
+    </g>
+
+    <!-- rising candlestick chart, left to right -->
+    <g>
+      <!-- trend line -->
+      <polyline points="120,288 280,264 440,272 600,224 760,232 920,176 1080,128 1200,96"
+                fill="none" stroke="#10b981" stroke-width="3" stroke-linejoin="round" opacity="0.55"/>
+      <!-- candles: (x, wickTop, bodyTop, bodyBottom, wickBottom, up?) -->
+      <g stroke-width="2">
+        <g stroke="#10b981" fill="#10b981">
+          <line x1="240" y1="250" x2="240" y2="306"/><rect x="228" y="262" width="24" height="30" rx="2"/>
+          <line x1="400" y1="242" x2="400" y2="298"/><rect x="388" y="252" width="24" height="34" rx="2"/>
+          <line x1="720" y1="196" x2="720" y2="256"/><rect x="708" y="206" width="24" height="36" rx="2"/>
+          <line x1="1040" y1="108" x2="1040" y2="172"/><rect x="1028" y="118" width="24" height="40" rx="2"/>
+        </g>
+        <g stroke="#f59e0b" fill="none">
+          <line x1="560" y1="196" x2="560" y2="252"/><rect x="548" y="204" width="24" height="32" rx="2" fill="#111318"/>
+          <line x1="880" y1="150" x2="880" y2="206"/><rect x="868" y="158" width="24" height="34" rx="2" fill="#111318"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- ship's wheel, center-right, overlapping the chart -->
+    <g transform="translate(640 180)" stroke="#10b981" fill="none" stroke-linecap="round">
+      <!-- handles -->
+      <g stroke-width="10">
+        <line x1="0" y1="-128" x2="0" y2="-104"/>
+        <line x1="0" y1="104" x2="0" y2="128"/>
+        <line x1="-128" y1="0" x2="-104" y2="0"/>
+        <line x1="104" y1="0" x2="128" y2="0"/>
+        <line x1="-90.5" y1="-90.5" x2="-73.5" y2="-73.5"/>
+        <line x1="90.5" y1="90.5" x2="73.5" y2="73.5"/>
+        <line x1="-90.5" y1="90.5" x2="-73.5" y2="73.5"/>
+        <line x1="90.5" y1="-90.5" x2="73.5" y2="-73.5"/>
+      </g>
+      <!-- rim -->
+      <circle r="96" stroke-width="9"/>
+      <!-- spokes -->
+      <g stroke-width="7">
+        <line x1="0" y1="-92" x2="0" y2="92"/>
+        <line x1="-92" y1="0" x2="92" y2="0"/>
+        <line x1="-65" y1="-65" x2="65" y2="65"/>
+        <line x1="-65" y1="65" x2="65" y2="-65"/>
+      </g>
+      <!-- hub -->
+      <circle r="20" fill="#10b981" stroke="none"/>
+      <circle r="8" fill="#111318" stroke="none"/>
+    </g>
+  </g>
+</svg>

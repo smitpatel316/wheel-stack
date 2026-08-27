@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="wheel-stack" width="720">
+</p>
+
 # wheel-stack
 
 **An autonomous options wheel engine for Alpaca** — sells cash-secured puts, manages them to profit or assignment, then sells covered calls, with multi-layer risk screens and self-healing data feeds.
