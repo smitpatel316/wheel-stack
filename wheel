@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# wheel — one-stop setup & control for wheel-stack
+#
+#   ./wheel setup          create venv, install deps, prepare .env, build dashboard
+#   ./wheel start          start the webhook receiver + Optionable dashboard
+#   ./wheel stop           stop everything start launched
+#   ./wheel status         show what's running and healthy
+#   ./wheel run            run one strategy cycle right now (foreground)
+#   ./wheel cron-install   install the 3x-per-market-day engine schedule
+#   ./wheel cron-remove    remove the engine schedule
+#
+# Layout this script manages:
+#   .venv/        python environment          logs/     runtime logs
+#   state/        pid files + engine state    data/     dashboard database (default)
+#
+# The dashboard lives in a sibling checkout of Optionable. Point at it with:
+#   export OPTIONABLE_DIR=/path/to/optionable     (default: ../optionable-src or ../optionable)
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+LOGS="$ROOT/logs"; STATE="$ROOT/state"
+mkdir -p "$LOGS" "$STATE"
+
+PY="$ROOT/.venv/bin/python"
+WEBHOOK_PORT="${WEBHOOK_PORT:-8644}"
+DASH_PORT="${DASH_PORT:-8096}"
+DATA_DIR="${DATA_DIR:-$ROOT/data/optionable}"
+
+find_dashboard() {
+  if [ -n "${OPTIONABLE_DIR:-}" ] && [ -f "$OPTIONABLE_DIR/server.js" ]; then
+    echo "$OPTIONABLE_DIR"; return 0
+  fi
+  for d in "$ROOT/../optionable-src" "$ROOT/../optionable"; do
+    if [ -f "$d/server.js" ]; then (cd "$ROOT" && realpath "$d"); return 0; fi
+  done
+  return 1
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+say()  { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+cmd_setup() {
+  have python3 || die "python3 not found"
+  python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' \
+    || die "python 3.10+ required (found $(python3 -V 2>&1))"
+
+  if [ ! -x "$PY" ]; then
+    python3 -m venv .venv
+    say "created .venv"
+  fi
+  "$PY" -m pip install -q --upgrade pip
+  "$PY" -m pip install -q -e .
+  say "python deps installed"
+
+  if [ ! -f .env ]; then
+    if [ -f config/.env.example ]; then
+      cp config/.env.example .env
+      warn "created .env from config/.env.example — add your API keys, then re-run: ./wheel setup"
+      warn "keys: ALPACA_API_KEY / ALPACA_SECRET_KEY (paper), FINNHUB_API_KEY, ALPHA_VANTAGE_API_KEY"
+      exit 0
+    fi
+    die "no .env and no config/.env.example to copy"
+  fi
+
+  local missing=0
+  for k in ALPACA_API_KEY ALPACA_SECRET_KEY FINNHUB_API_KEY ALPHA_VANTAGE_API_KEY; do
+    if ! grep -qE "^${k}=.+" .env; then warn ".env is missing $k"; missing=1; fi
+  done
+  [ "$missing" = 0 ] && say ".env has all required keys"
+
+  if DASH="$(find_dashboard)"; then
+    if [ ! -d "$DASH/dist" ]; then
+      if have bun; then (cd "$DASH" && bun install && bun run build)
+      elif have node; then (cd "$DASH" && (npm install || pnpm install) && npm run build)
+      else warn "dashboard found at $DASH but neither bun nor node is installed — skipping dashboard build"; fi
+    fi
+    [ -d "$DASH/dist" ] && say "dashboard ready ($DASH)"
+  else
+    warn "Optionable dashboard checkout not found — engine works without it; clone it next to this repo or set OPTIONABLE_DIR"
+  fi
+
+  say "setup complete — next: ./wheel start && ./wheel cron-install"
+}
+
+start_bg() { # name, pidfile, logfile, cmd...
+  local name="$1" pidfile="$2" logfile="$3"; shift 3
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    say "$name already running (pid $(cat "$pidfile"))"; return 0
+  fi
+  nohup "$@" >> "$logfile" 2>&1 < /dev/null &
+  echo $! > "$pidfile"
+  say "$name started (pid $!, log: ${logfile#$ROOT/})"
+}
+
+cmd_start() {
+  [ -f .env ] || die "no .env — run ./wheel setup first"
+
+  start_bg "webhook :$WEBHOOK_PORT" "$STATE/webhook.pid" "$LOGS/webhook-server.log" \
+    "$PY" scripts/webhook_server.py
+
+  if DASH="$(find_dashboard)"; then
+    [ -d "$DASH/dist" ] || die "dashboard not built — run ./wheel setup"
+    mkdir -p "$DATA_DIR"
+    local runner=node; have bun && runner=bun
+    start_bg "dashboard :$DASH_PORT" "$STATE/dashboard.pid" "$LOGS/dashboard.log" \
+      env DATA_DIR="$DATA_DIR" PORT="$DASH_PORT" NODE_ENV=production "$runner" "$DASH/server.js"
+  else
+    warn "dashboard not found, skipping (engine + webhook still run)"
+  fi
+
+  echo
+  cmd_status || true
+  echo
+  echo "Engine runs are scheduled, not daemons. Install the schedule with: ./wheel cron-install"
+}
+
+cmd_stop() {
+  for n in webhook dashboard; do
+    local pf="$STATE/$n.pid"
+    if [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null; then
+      kill "$(cat "$pf")" && say "$n stopped"
+    fi
+    rm -f "$pf"
+  done
+}
+
+cmd_status() {
+  local ok=0
+  for n in webhook dashboard; do
+    local pf="$STATE/$n.pid"
+    if [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null; then
+      say "$n running (pid $(cat "$pf"))"; ok=1
+    else
+      warn "$n not running"
+    fi
+  done
+  if have curl; then
+    curl -sf --max-time 3 "http://localhost:$WEBHOOK_PORT/health" >/dev/null \
+      && say "webhook health OK" || warn "webhook health check failed"
+    curl -sf --max-time 3 "http://localhost:$DASH_PORT/api/health" >/dev/null \
+      && say "dashboard health OK" || warn "dashboard health check failed (or not installed)"
+  fi
+  return $((1-ok))
+}
+
+cmd_run() {
+  [ -f .env ] || die "no .env — run ./wheel setup first"
+  echo "Running one strategy cycle (paper unless IS_PAPER=false in .env)…"
+  PYTHONPATH="$ROOT" "$PY" scripts/run_strategy.py --strat-log --log-level INFO 2>&1 | tee -a "$LOGS/run-manual.log"
+}
+
+CRON_MARK="# wheel-stack engine"
+cmd_cron_install() {
+  local block
+  block="$CRON_MARK — 3 runs per market day (ET): after open, midday, before close
+CRON_TZ=America/New_York $CRON_MARK
+5 10 * * 1-5 cd $ROOT && PYTHONPATH=$ROOT $PY scripts/run_strategy.py >> $LOGS/cron.log 2>&1 $CRON_MARK
+5 13 * * 1-5 cd $ROOT && PYTHONPATH=$ROOT $PY scripts/run_strategy.py >> $LOGS/cron.log 2>&1 $CRON_MARK
+5 15 * * 1-5 cd $ROOT && PYTHONPATH=$ROOT $PY scripts/run_strategy.py >> $LOGS/cron.log 2>&1 $CRON_MARK"
+  if crontab -l 2>/dev/null | grep -qF "$CRON_MARK"; then
+    warn "wheel cron entries already installed (crontab -l to see them)"; exit 0
+  fi
+  ( crontab -l 2>/dev/null; echo "$block" ) | crontab -
+  say "installed 3 engine runs per market day (10:05 / 13:05 / 15:05 ET, Mon–Fri)"
+}
+
+cmd_cron_remove() {
+  crontab -l 2>/dev/null | grep -vF "$CRON_MARK" | crontab - || true
+  say "wheel cron entries removed"
+}
+
+case "${1:-}" in
+  setup)        cmd_setup ;;
+  start)        cmd_start ;;
+  stop)         cmd_stop ;;
+  status)       cmd_status ;;
+  run)          cmd_run ;;
+  cron-install) cmd_cron_install ;;
+  cron-remove)  cmd_cron_remove ;;
+  *)            grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20 ;;
+esac

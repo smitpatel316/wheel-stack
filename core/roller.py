@@ -475,19 +475,35 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
         )
         close_order = client.trade_client.submit_order(close_req)
         close_id = getattr(close_order,'id','')
-        log.info(f"[ROLL] Close order {close_id} submitted for {candidate.symbol} - waiting 2s close-before-open (v2.5.4 ROBUST)")
-        time.sleep(2.0)  # v2.5.4 mandatory 2s delay close-before-open
+        log.info(f"[ROLL] Close order {close_id} submitted for {candidate.symbol} - polling fill + BP release (v2.5.5)")
 
-        # Verify close filled? Optional check order status
-        try:
-            # Brief check if order filled
-            filled_order = client.trade_client.get_order_by_id(close_id) if close_id else None
-            if filled_order:
-                st = str(getattr(filled_order, 'status', '')).lower()
-                log.info(f"[ROLL] Close order {close_id} status {st} after 2s")
-        except Exception as e:
-            log.warning("[SWALLOWED] close-order status check failed for %s (order %s): %r", candidate.symbol, close_id, e)
-            pass
+        # v2.5.5: poll until the close fills AND Alpaca releases the freed
+        # collateral into options buying power before submitting the open leg.
+        # The old fixed 2s wait raced the BP release - 2026-08-27 JNJ: close
+        # filled, open rejected for insufficient BP 2s later, lineage closed
+        # with no replacement. Poll up to 45s.
+        required_bp = target.strike * 100 * qty_abs
+        opened_bp = 0.0
+        close_status = "unknown"
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            time.sleep(2.0)
+            try:
+                if close_id:
+                    close_status = str(getattr(client.trade_client.get_order_by_id(close_id), 'status', '')).lower()
+                opened_bp = float(getattr(client.get_account(), 'options_buying_power', 0) or 0)
+            except Exception as e:
+                log.warning("[SWALLOWED] close fill/BP poll failed for %s (order %s): %r", candidate.symbol, close_id, e)
+                continue
+            if close_status == 'filled' and opened_bp >= required_bp:
+                break
+        log.info(f"[ROLL] Close status {close_status}, options BP ${opened_bp:,.0f} vs required ~${required_bp:,.0f} - proceeding with open leg")
+        if close_status == 'filled' and opened_bp < required_bp:
+            log.warning(
+                f"[ROLL] BP still short after 45s wait for {candidate.symbol} "
+                f"(${opened_bp:,.0f} < ${required_bp:,.0f}) - attempting open anyway; "
+                f"if rejected, the lineage stays closed and the name is re-evaluated as a fresh CSP next run"
+            )
 
         log.info(f"[ROLL] Opening {target.symbol} sell {candidate.qty} net credit ${target.net_credit:.2f} gross ${target.net_credit*100*qty_abs:.2f} after-fees ${net_credit_after_fees:.2f} {target.reasoning}")
 
