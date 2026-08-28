@@ -40,7 +40,9 @@ def test_defaults_restored_without_env(fresh_params):
     assert p.MAX_RISK == 90_000
     assert p.MIN_PREMIUM == 0.20
     assert p.SCORE_MIN == 0.02
-    assert p.SGOV_ENABLED is False
+    # 2026-08-28: default flipped back to True for the v2.8 float-model live
+    # paper test (Smit reversed the 2026-08-27 clean-week flag-off).
+    assert p.SGOV_ENABLED is True
 
 
 def test_bool_parsing_variants(fresh_params):
