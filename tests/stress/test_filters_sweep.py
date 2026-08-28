@@ -165,9 +165,24 @@ class TestSellCalls:
 
 
 class TestSgovSweep:
-    """SG: sync_sgov_real sweep math — both directions market, no dupes."""
+    """SG: float-model SGOV reconcile (v2.8, 2026-08-28).
 
-    def _setup(self, cash, sgov_qty, stock_bp, sgov_price=100.50, opt_bp=14_000.0):
+    Tre target is now the structural float: max(0, equity - risk_cap).
+    Every test passes an explicit risk_cap so the float is observable; the
+    historical guards the numbers pin (no duplicate orders, pending-sell
+    accounting, BP-safe buys) are unchanged from the old sweep model.
+    Band = $2k default, so drift scenarios use >= $2k swings.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _sgov_flag_on(self, monkeypatch):
+        # prod gates the call site on SGOV_ENABLED; tests exercise the
+        # function body, so the flag is on here and patched False only in
+        # tests that specifically cover the kill switch (test_sgov_float.py).
+        monkeypatch.setattr("scripts.run_strategy.SGOV_ENABLED", True)
+
+    def _setup(self, cash, sgov_qty, stock_bp, risk_cap=0, sgov_price=100.50,
+               opt_bp=14_000.0):
         from scripts.run_strategy import sync_sgov_real
         c = FakeBrokerClient(FakeAccount(cash=cash, equity=cash + sgov_qty * sgov_price,
                                          buying_power=stock_bp,
@@ -175,24 +190,26 @@ class TestSgovSweep:
         if sgov_qty:
             c.positions.append(FakePosition("SGOV", sgov_qty, sgov_price, sgov_price))
         c.stock_trades["SGOV"] = sgov_price
-        return sync_sgov_real, c
+        return (lambda log: sync_sgov_real(c, log, risk_cap=risk_cap)), c
 
     def test_sg1_under_target_buys_diff(self):
+        # equity $10k, cap $0 -> float target $10k. floor(10000/100.50)=99.
         fn, c = self._setup(cash=10_000, sgov_qty=0, stock_bp=50_000)
-        fn(c, logging.getLogger("t"), risk_override=0)
-        # target = min(10000-500, 50000-1000+0) = 9500 -> 94 shares
-        assert c.stock_buys == [("SGOV", 94)]
+        fn(logging.getLogger("t"))
+        assert c.stock_buys == [("SGOV", 99)]
 
     def test_sg2_over_target_sells_diff(self):
-        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000)
-        # total liquid = 100 + 50250 = 50350; target = 49850 -> floor(49850/100.50)=496 shares; sell 4
-        fn(c, logging.getLogger("t"), risk_override=0)
-        assert c.stock_sells == [("SGOV", 4)]
+        # held 500 ($50,250), target $30,000 -> desired 298 -> sell 202.
+        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000,
+                            risk_cap=20_350)  # equity 50,350
+        fn(logging.getLogger("t"))
+        assert c.stock_sells == [("SGOV", 202)]
 
     def test_sg3_at_target_no_order(self):
-        fn, c = self._setup(cash=500, sgov_qty=100, stock_bp=1_000_000)
-        # liquid = 500 + 10050 = 10550; target ideal = 10050 -> exactly 100 shares
-        fn(c, logging.getLogger("t"), risk_override=0)
+        # target exactly equals held value -> drift $0, inside band.
+        fn, c = self._setup(cash=500, sgov_qty=100, stock_bp=1_000_000,
+                            risk_cap=500)  # equity 10,550 -> target 10,050 = held
+        fn(logging.getLogger("t"))
         assert not c.stock_buys and not c.stock_sells
 
     def test_sg4_open_buy_skips_duplicate(self):
@@ -200,93 +217,84 @@ class TestSgovSweep:
         from tests.stress.fakes import FakeOrder
         o = FakeOrder("SGOV", 5, "buy", status="new")
         c.orders[o.id] = o
-        fn(c, logging.getLogger("t"), risk_override=0)
-        assert not c.stock_buys, "open SGOV buy must suppress the sweep buy"
+        fn(logging.getLogger("t"))
+        assert not c.stock_buys, "open SGOV buy must suppress the float buy"
 
     def test_sg5_missing_quote_falls_back(self):
-        fn, c = self._setup(cash=500, sgov_qty=100, stock_bp=1_000_000)
-        c.stock_trades = {}  # no quote at all
-        fn(c, logging.getLogger("t"), risk_override=0)  # must not raise
+        fn, c = self._setup(cash=500, sgov_qty=100, stock_bp=1_000_000,
+                            risk_cap=500)
+        c.stock_trades = {}  # no quote at all -> position price fallback
+        fn(logging.getLogger("t"))  # must not raise
 
     def test_sg6_market_both_ways(self):
         fn, c = self._setup(cash=10_000, sgov_qty=0, stock_bp=50_000)
-        fn(c, logging.getLogger("t"), risk_override=0)
+        fn(logging.getLogger("t"))
         assert all(o.type == "market" for o in c.submitted)
 
     def test_sg7_pending_sell_suppresses_double_sell(self):
-        # 2026-08-18 midday run: a 416-share funding-queue pre-fund sale was
-        # pending, then the sweep tried to sell 541 MORE against only 196
-        # available -> Alpaca 403 "insufficient qty". Pending SGOV sells must
-        # count against the position when computing the sweep diff.
-        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000)
-        # liquid = 100 + 50250 = 50350; target = 49850 -> 496 shares; naive diff -4
+        # 2026-08-18 midday run root cause (416-share pre-fund pending, the
+        # sweep tried to sell 541 against only 196 available). Pending sells
+        # must count against the position; when they already cover the
+        # reduction the reconcile must place nothing.
+        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000,
+                            risk_cap=10_150)  # equity 50,350 -> target 40,200 -> 400 sh
         from tests.stress.fakes import FakeOrder
         o = FakeOrder("SGOV", 100, "sell", status="new")
         c.orders[o.id] = o
-        fn(c, logging.getLogger("t"), risk_override=0)
-        assert not c.stock_sells, "pending sell already covers the diff; sweep must not sell again"
+        fn(logging.getLogger("t"))  # effective 500-100=400 = desired -> no sell
+        assert not c.stock_sells, "pending sell already covers the reduction"
         assert not c.stock_buys
 
     def test_sg8_pending_sell_caps_additional_sell(self):
         # Same root cause, other branch: target below (qty - pending) still
         # sells, but only the remainder, never more than will remain.
-        fn, c = self._setup(cash=10_000, sgov_qty=500, stock_bp=1_000_000)
-        # queue reserve -> target 300 shares: liquid 60250 - 500 - 29600 = 30150 -> 300
-        import json, os
-        from datetime import date as _date, timedelta as _td
-        qpath = os.environ["WHEEL_FUNDING_QUEUE"]
-        tomorrow = (_date.today() + _td(days=1)).isoformat()
-        # reserve = need - opt_bp(14000) -> need 43600 for a 29600 reserve
-        with open(qpath, "w") as f:
-            json.dump({"entries": [{"symbol": "X260918P00436000", "underlying": "X",
-                                    "strike": 436.0, "expiration": "2026-09-18",
-                                    "need": 43_600, "score": 0.01,
-                                    "queued_at": "2026-08-18T00:00:00-04:00",
-                                    "valid_for": tomorrow}],
-                       "prefunded": 0.0}, f)
+        # (Float model note: the old queue-reserve target-shrink is gone —
+        # in-cap cash is never swept now, so queue cash stays liquid by
+        # construction.)
+        fn, c = self._setup(cash=100, sgov_qty=500, stock_bp=1_000_000,
+                            risk_cap=20_200)  # equity 50,350 -> target 30,150 -> 300 sh
         from tests.stress.fakes import FakeOrder
         o = FakeOrder("SGOV", 100, "sell", status="new")
         c.orders[o.id] = o
-        fn(c, logging.getLogger("t"), risk_override=0)
-        # naive diff = 300 - 500 = -200; pending 100 -> effective 400 -> sell exactly 100
+        fn(logging.getLogger("t"))
+        # effective 500-100=400; sell exactly 400-300=100.
         assert c.stock_sells == [("SGOV", 100)]
 
     def test_sg9_pending_sell_suppresses_buy_churn(self):
-        # Position is mid-flight down (pending sell); a target ABOVE the
-        # effective qty must NOT trigger a buy-back — that was the Aug 17
-        # sell+buy-back churn the funding queue exists to eliminate.
-        fn, c = self._setup(cash=10_000, sgov_qty=500, stock_bp=1_000_000)
-        # liquid 60250; target 59750 -> 594 shares; naive diff +94 (buy)
+        # Position mid-flight down (pending sell); a target ABOVE holdings
+        # must NOT trigger a buy-back — the Aug 17 sell+buy-back churn the
+        # funding queue exists to eliminate.
+        fn, c = self._setup(cash=10_000, sgov_qty=500, stock_bp=1_000_000,
+                            risk_cap=100)  # equity 60,250 -> target 60,150 ->
+                                           # drift +$9,900 (buy side)...
         from tests.stress.fakes import FakeOrder
         o = FakeOrder("SGOV", 100, "sell", status="new")
         c.orders[o.id] = o
-        fn(c, logging.getLogger("t"), risk_override=0)
+        fn(logging.getLogger("t"))  # ...but a sell is pending -> hold.
         assert not c.stock_buys and not c.stock_sells
 
     def test_sg10_low_stock_bp_never_forces_sell(self):
-        # 2026-08-21: with stock BP under the $1k buffer the old cap
-        # (max(0, stock_bp-1000) + sgov_mv) forced a sale of (1000-stock_bp)
-        # dollars BELOW current holdings — 10 shares sold in the morning run,
-        # 6 more midday, then a 1-share buy-back in the afternoon. Buying
-        # power constrains PURCHASES only; holding SGOV consumes none. Low BP
-        # must mean "no buys", never "forced sell".
-        fn, c = self._setup(cash=40_000, sgov_qty=616, stock_bp=0)
-        # liquid = 40000 + 616*100.50 = 101908; ideal target = 101408 -> 1009
-        # shares (buy side), real target capped at holdings (no buy capacity):
-        # 61908 -> exactly 616 shares -> no order either way.
-        fn(c, logging.getLogger("t"), risk_override=0)
+        # 2026-08-21 lesson: buying power constrains PURCHASES only; holding
+        # SGOV consumes none. With stock BP $0 a target above holdings must
+        # yield NO order at all (cap -> 0 shares), never a "forced sell".
+        fn, c = self._setup(cash=40_000, sgov_qty=616, stock_bp=0,
+                            risk_cap=35_000)  # equity 101,908 -> target 66,908
+        # drift +$5,000 (buy side); buy_capacity = 0-1000 -> 0 -> cap to 0.
+        fn(logging.getLogger("t"))
         assert not c.stock_sells and not c.stock_buys
 
     def test_sg11_filled_prefund_sale_suppresses_double_sell(self):
         # 2026-08-21 morning run: the funding-queue pre-fund market sale
         # FILLED instantly, so the open-orders guard couldn't see it, and
         # Alpaca's position endpoint still showed the pre-sale qty — the
-        # sweep sold the same 10 shares again 29s later. The pre-fund path
-        # now records its qty in the queue ledger; the sweep must subtract
-        # it even with no open order visible.
+        # sweep sold the same shares again 29s later. The ledger qty must be
+        # subtracted even with no open order visible. (Float-model numbers:
+        # a pre-fund sells $10k so the reduction spans the band.)
         import json, os
         from datetime import datetime as _dt
-        fn, c = self._setup(cash=4_495, sgov_qty=626, stock_bp=0, sgov_price=100.59)
+        fn_obj = self._setup(cash=4_495, sgov_qty=626, stock_bp=0,
+                             sgov_price=100.59, risk_cap=14_502.34)
+        fn, c = fn_obj
         qpath = os.environ["WHEEL_FUNDING_QUEUE"]
         with open(qpath, "w") as f:
             json.dump({"entries": [{"symbol": "X261016P00190000", "underlying": "X",
@@ -294,14 +302,13 @@ class TestSgovSweep:
                                     "need": 19_000.0, "score": 0.05,
                                     "queued_at": _dt.now().isoformat(timespec="seconds"),
                                     "valid_for": _dt.now().date().isoformat()}],
-                       "prefunded": 5_000.0,
-                       "last_prefund": {"qty": 10,
+                       "prefunded": 10_059.0,
+                       "last_prefund": {"qty": 100,
                                         "at": _dt.now().astimezone().isoformat(timespec="seconds")}}, f)
-        # reserve = 19000 - opt_bp(14000) = 5000; liquid = 4495 + 626*100.59
-        # = 67464; ideal target = 67464 - 500 - 5000 = 61964 -> 616 shares.
-        # Naive diff vs the stale 626 = -10 (would double-sell the pre-fund's
-        # 10); pending-prefund adjustment -> effective 616 -> no order.
-        fn(c, logging.getLogger("t"), risk_override=0)
+        # equity 67,464.34; target 52,962 -> 526 shares. Naive vs stale 626
+        # = sell 100 (would double-sell the pre-fund); effective 626-100=526
+        # = desired -> no order.
+        fn(logging.getLogger("t"))
         assert not c.stock_sells and not c.stock_buys
 
     @staticmethod
@@ -318,22 +325,20 @@ class TestSgovSweep:
                        "prefunded": float(prefunded)}, f)
 
     def test_sg12_queue_pending_blocks_sweep_buy(self):
-        # 2026-08-24 live bug: morning pre-fund sold 54 SGOV ($5434) for the
-        # queued BAC $5750 CSP; the midday sweep saw the fresh cash and bought
-        # 64 SGOV back ($6440) because the stock-BP buy cap — not the queue
-        # reserve — was the binding target. Options BP went to $0 and the
-        # afternoon BAC sell failed 40310000 (required 5681, available 0).
-        # Every swept $1 is $1 less settled cash = $1 less options BP for the
-        # queue; with need > current options BP, no buy may happen at all.
+        # 2026-08-24 live bug: morning pre-fund sold 54 SGOV for a queued CSP;
+        # the midday sweep re-bought 64 because nothing guarded settled
+        # options BP; the afternoon sell then failed 40310000 with BP $0.
+        # Every swept $1 is $1 less options BP for the queue; with need >
+        # current options BP, no buy may happen at all.
         import os
         fn, c = self._setup(cash=45_898, sgov_qty=557, stock_bp=7_540,
-                            sgov_price=100.63, opt_bp=1_884)
+                            sgov_price=100.63, opt_bp=1_884, risk_cap=30_000)
         self._write_queue(os.environ["WHEEL_FUNDING_QUEUE"], need=5_750,
                           prefunded=5_656)
-        # Without the guard: real target = 56051 + (7540-1000) = 62591 -> 621
-        # shares -> diff +64 buy. With the guard: headroom = 1884-5750 < 0 -> 0.
-        fn(c, logging.getLogger("t"), risk_override=0)
-        assert not c.stock_buys, "sweep must not re-buy SGOV while a CSP queue is underfunded"
+        # equity 101,948.91 -> target 71,948.91 -> drift +$15,898 (buy side);
+        # naive buy 714-557=157, stock-BP cap 64 — queue headroom caps to 0.
+        fn(logging.getLogger("t"))
+        assert not c.stock_buys, "float buy must not eat the queue's options BP"
         assert not c.stock_sells
 
     def test_sg13_queue_pending_caps_buy_to_bp_headroom(self):
@@ -341,10 +346,10 @@ class TestSgovSweep:
         # only the excess may be swept.
         import os
         fn, c = self._setup(cash=45_898, sgov_qty=557, stock_bp=7_540,
-                            sgov_price=100.63, opt_bp=8_000)
+                            sgov_price=100.63, opt_bp=8_000, risk_cap=30_000)
         self._write_queue(os.environ["WHEEL_FUNDING_QUEUE"], need=5_750)
         # headroom = 8000 - 5750 = 2250 -> floor(2250/100.63) = 22 shares
-        fn(c, logging.getLogger("t"), risk_override=0)
+        fn(logging.getLogger("t"))
         assert c.stock_buys == [("SGOV", 22)]
         assert not c.stock_sells
 

@@ -94,7 +94,8 @@ def _trade_payload(ticker="F", strike=10.0, exp="2026-09-18", sync_id=None, acco
 
 def test_push_with_server_down_enqueues_first_and_never_raises(isolated, monkeypatch):
     monkeypatch.setattr(osync, "alive", lambda: False)
-    ok = osync.push_trade_to_optionable(OCC, 0.5, contracts=1, delta=-0.3, account_id=1)
+    ok = osync.push_trade_to_optionable(OCC, 0.5, contracts=1, delta=-0.3,
+                                        opened_date=OPENED, account_id=1)
     assert ok is False
     files = _outbox_files(isolated)
     assert len(files) == 1

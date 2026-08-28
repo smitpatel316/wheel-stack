@@ -11,7 +11,8 @@
 #          RH Gold: 4.3% auto on uninvested cash same wrapper.
 #          SGOV iShares 0-3M T-Bill ETF 5.22% APY wrapper for Alpaca paper limitation.
 #          Alpaca paper: SGOV is stock not cash collateral, so stock BP limits sweep (ideal 1007 shares $101k vs real 454 $45k)
-#          Sweep logic in sync_sgov_real(): target_ideal = total_liquid-500, target_real = min(ideal, stockBP-1000+sgov_mv)
+#          v2.8 float model (2026-08-28): target_mv = max(0, equity - effective risk cap);
+#          cash inside the cap is NEVER swept (deployed collateral + slack stay liquid).
 #          BP guard updated: buying_power>=2000 and (opt_bp>=2000 or total_liq>=2000) SPAXX model sweep doesn't block wheel
 # v2.5.4 - P/L bugfix + RH MCP
 #          BUG FIX: Optionable sync_closed_trades set closePrice=0 always => phantom $568 vs real $52 realized.
@@ -120,6 +121,13 @@ SGOV_YIELD_MONTHLY = 0.0043  # ~0.43% monthly div
 SGOV_CASH_BUFFER = 500  # keep $500 cash buffer not swept
 SGOV_STOCK_BP_BUFFER = 1000  # keep $1000 stock BP buffer
 SGOV_TARGET_PCT = 0.99  # sweep 99% liquid to SGOV
+# v2.8 float model (2026-08-28): SGOV holds only the structural float, i.e.
+# account equity above the effective risk cap (v2.7 dynamic MAX_RISK after
+# regime scaling). Cash inside the cap is never swept — deployed becomes CSP
+# collateral, leftover slack stays liquid. Rebalance only when
+# |target_mv - held_mv| exceeds this band, so routine equity/regime noise
+# doesn't churn orders.
+SGOV_REBALANCE_BAND = 2000.0
 
 # RH MCP official v2.5.4
 # URL: https://agent.robinhood.com/mcp/trading
@@ -217,6 +225,7 @@ PNL_TRACKER_ENABLED = _env_bool("PNL_TRACKER_ENABLED", PNL_TRACKER_ENABLED)
 
 SGOV_CASH_BUFFER = _env_float("SGOV_CASH_BUFFER", SGOV_CASH_BUFFER)
 SGOV_TARGET_PCT = _env_float("SGOV_TARGET_PCT", SGOV_TARGET_PCT)
+SGOV_REBALANCE_BAND = _env_float("SGOV_REBALANCE_BAND", SGOV_REBALANCE_BAND)
 
 
 def load_watchlist(symbols_file=None):

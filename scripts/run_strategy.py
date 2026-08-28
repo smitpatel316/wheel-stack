@@ -1,7 +1,7 @@
 from pathlib import Path
 from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
-from core.state_manager import update_state, calculate_risk, calculate_exposures, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
+from core.state_manager import update_state, calculate_risk, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
 from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
 from app_logging.strategy_logger import StrategyLogger
@@ -14,178 +14,30 @@ from core.roller import evaluate_all_positions, find_roll_targets, roll_position
 from core.closer import evaluate_all_for_close, close_position
 from core.earnings_calendar import build_cache as earnings_build_cache, get_earnings_risk_report
 from models.contract import Contract
-import math
 import os
 import json
 
 TOTAL_CAPITAL = 100_000
 
-def sync_sgov_real(client, logger, risk_override=None):
-    """v2.5.3 SGOV as SPAXX/Robinhood sweep - interest on sitting collateral
-    Fidelity model: All cash including put collateral sits in SPAXX earning ~5%, still counts as CSP collateral.
-    Robinhood model: Fixed interest on cash balance.
-    SGOV is wrapper for that interest. We sweep 99% of cash into SGOV, log daily/monthly yield.
+def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=None):
+    """SGOV float sync (v2.8, 2026-08-28 per Smit).
+
+    The old sweep-all-idle-cash model is gone. SGOV now holds ONLY the
+    structural float above the effective risk cap (core/sgov_float.py);
+    cash inside the cap — deployed collateral AND sub-contract slack —
+    stays liquid. risk_override is accepted for call-site compatibility but
+    no longer affects the target (deployed risk never did belong in it);
+    risk_cap is the run's effective MAX_RISK after adapt_params scaling.
     """
-    try:
-        positions = client.get_positions()
-        acct = client.get_account()
-        if risk_override is not None:
-            put_exp, long_stock, risk = 0, 0, risk_override
-            try:
-                pe, ls, r = calculate_exposures(positions)
-                put_exp, long_stock = pe, ls
-                if risk_override == 0:
-                    risk = r
-            except Exception as e:
-                logger.warning("[SWALLOWED] calculate_exposures failed in SGOV sweep, zeroing put/long exposure (risk_override=%s): %r", risk_override, e)
-                put_exp, long_stock = 0, 0
-        else:
-            put_exp, long_stock, risk = calculate_exposures(positions)
+    if not SGOV_ENABLED:
+        # Internal belt: the call site already gates on SGOV_ENABLED, but an
+        # explicit gate here guarantees a disabled flag can never emit an
+        # order-intent log line or place an order (clean-week guarantee).
+        return
+    from core.sgov_float import sync_sgov_float
+    sync_sgov_float(client, logger, equity=equity, risk_cap=risk_cap,
+                    enabled=SGOV_ENABLED)
 
-        sgov_qty = 0
-        sgov_price = 100.72
-        sgov_mv = 0
-        for p in positions:
-            if getattr(p, 'symbol', '') == 'SGOV':
-                try:
-                    sgov_qty = int(float(getattr(p, 'qty', 0)))
-                    sgov_price = float(getattr(p, 'current_price', sgov_price) or sgov_price)
-                    sgov_mv = sgov_qty * sgov_price
-                except Exception as e:
-                    logger.debug("[SWALLOWED] SGOV position field parse failed, keeping qty/price defaults: %r", e)
-                    pass
-        try:
-            latest = client.get_stock_latest_trade("SGOV")
-            trade = latest.get("SGOV") if isinstance(latest, dict) else None
-            if trade:
-                pr = getattr(trade, 'price', None) or (trade.get('price') if isinstance(trade, dict) else None)
-                if pr:
-                    sgov_price = float(pr)
-                    sgov_mv = sgov_qty * sgov_price
-        except Exception as e:
-            logger.info(f"SGOV price fetch fallback: {e}")
-
-        cash = float(acct.cash)
-        equity = float(acct.equity)
-        stock_bp = float(getattr(acct, 'buying_power', 0) or 0)
-        opt_bp_sweep = float(getattr(acct, 'options_buying_power', 0) or 0)
-        cashBuffer = 500.0  # keep $500 cash for fees
-
-        # T+1 funding queue: cash earmarked for queued CSP candidates must NOT
-        # be swept back into SGOV (that buy-back was the churn removed
-        # 2026-08-17). Reserve the part not already covered by settled BP.
-        queue_reserve = 0.0
-        queue_need_pending = 0.0
-        prefund_pending_qty = 0
-        try:
-            from core.funding_queue import FundingQueue
-            _q = FundingQueue().load()
-            _q.expire()
-            _q.save()
-            queue_reserve = _q.reserve_amount(opt_bp_sweep)
-            queue_need_pending = _q.pending_need()
-            # A pre-fund market sale that already FILLED is invisible to the
-            # open-orders guard below, and Alpaca's position endpoint lags the
-            # fill — without this the sweep double-sells in the same run
-            # (2026-08-21 morning: pre-fund sold 10, sweep sold 10 more 29s
-            # later off the stale position read).
-            prefund_pending_qty = _q.pending_prefund_qty()
-            if queue_reserve > 0:
-                logger.info(f"[SGOV] Holding back ${queue_reserve:.0f} from sweep for {len(_q.entries)} queued CSP candidate(s) (T+1 funding)")
-        except Exception as _qe:
-            logger.debug(f"[SGOV] funding-queue reserve check failed: {_qe}")
-
-        # v2.5.3 sweep model: all cash including put collateral earns interest via SGOV/SPAXX
-        # Fidelity SPAXX sweep: cash + money market both count as CSP collateral, so we sweep 99% cash to SGOV
-        # Alpaca paper limitation: SGOV is stock, not cash, so stock BP limits sweep (see failed buy log above)
-        total_liquid = cash + sgov_mv  # total money market + cash
-        target_sweep_mv_ideal = max(0, total_liquid - cashBuffer - queue_reserve)  # ideal Fidelity model: sweep all (minus queued-CSP reserve)
-        # Alpaca realistic: limited by stock BP because SGOV is equity, not cash collateral
-        # BP constrains NEW purchases only — holding existing SGOV consumes no
-        # buying power. The old cap (max(0, stock_bp-1000) + sgov_mv) forced a
-        # sale of (1000 - stock_bp) dollars whenever stock BP dipped under $1k
-        # (2026-08-21: forced sells of 10+6 shares in the morning/midday runs,
-        # then a 1-share buy-back in the afternoon — pure churn).
-        buy_capacity = max(0.0, stock_bp - 1000)  # keep $1k buffer for stock BP
-        target_sweep_mv_real = min(target_sweep_mv_ideal, sgov_mv + buy_capacity)
-        # Use realistic for actual order
-        target_sweep_mv = target_sweep_mv_real
-        target_shares = math.floor(target_sweep_mv / sgov_price) if target_sweep_mv >= sgov_price else 0
-
-        # Old idle model for reference: idle = TOTAL_CAPITAL - risk
-        idle_old = TOTAL_CAPITAL - risk
-        target_old = max(0, idle_old)
-        target_old_shares = math.floor(target_old / sgov_price) if target_old >= sgov_price else 0
-
-        diff = target_shares - sgov_qty
-        # SGOV yield ~5.22% APY, monthly div ~0.43%, daily accrual
-        sgov_yield_apy = 0.0522
-        daily_interest_ideal = target_sweep_mv_ideal * sgov_yield_apy / 365.0
-        monthly_interest_ideal = target_sweep_mv_ideal * sgov_yield_apy / 12.0
-        annual_interest_ideal = target_sweep_mv_ideal * sgov_yield_apy
-        daily_interest_real = target_sweep_mv * sgov_yield_apy / 365.0
-        monthly_interest_real = target_sweep_mv * sgov_yield_apy / 12.0
-
-        logger.info(f"[SGOV SWEEP] Fidelity SPAXX/RH wrapper: cash ${cash:.0f} + SGOV {sgov_qty}x${sgov_price:.2f}=${sgov_mv:.0f} total liquid ${total_liquid:.0f} stockBP ${stock_bp:.0f} buffer ${cashBuffer:.0f}")
-        logger.info(f"[SGOV] target {target_shares} shares ${target_sweep_mv:.0f} diff {diff} ideal would be {math.floor(target_sweep_mv_ideal/sgov_price)} ${target_sweep_mv_ideal:.0f} (old idle model {target_old_shares} ${target_old:.0f}) | put ${put_exp:.0f} long ${long_stock:.0f} idle_old ${idle_old:.0f} risk ${risk:.0f}")
-        logger.info(f"[SGOV YIELD] Ideal Fidelity sweep APY {sgov_yield_apy*100:.2f}% on ${target_sweep_mv_ideal:.0f} = ${daily_interest_ideal:.2f}/day ${monthly_interest_ideal:.2f}/mo ${annual_interest_ideal:.0f}/yr | Real Alpaca limited ${target_sweep_mv:.0f} = ${daily_interest_real:.2f}/day ${monthly_interest_real:.2f}/mo")
-        if abs(target_sweep_mv_ideal - target_sweep_mv) > 1000:
-            logger.info(f"[SGOV] Alpaca paper limitation: SGOV is stock not cash collateral, stockBP ${stock_bp:.0f} limits sweep vs Fidelity SPAXX where MMF counts as collateral - ideal ${target_sweep_mv_ideal:.0f} real ${target_sweep_mv:.0f} diff ${target_sweep_mv_ideal-target_sweep_mv:.0f}")
-
-        try:
-            from alpaca.trading.requests import GetOrdersRequest
-            from alpaca.trading.enums import QueryOrderStatus
-            open_orders = client.trade_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=50))
-            sgov_open_buy = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('buy')>=0)
-            sgov_open_sell = sum(int(float(o.qty)) for o in open_orders if getattr(o,'symbol','')=='SGOV' and str(getattr(o,'side','')).lower().find('sell')>=0)
-            if prefund_pending_qty > 0:
-                sgov_open_sell += prefund_pending_qty
-            if sgov_open_buy > 0:
-                logger.info(f"[SGOV] Existing open BUY SGOV {sgov_open_buy} - skip duplicate")
-                diff = 0
-            elif sgov_open_sell > 0:
-                # Pending SGOV sells (e.g. the funding-queue pre-fund sale) are
-                # already committed against this position. Without accounting
-                # for them the sweep double-sells and Alpaca rejects with
-                # "insufficient qty available" (2026-08-18 midday run: tried
-                # to sell 541 with only 196 available after a 416-share
-                # pre-fund). Never BUY while sells are pending either — the
-                # position is mid-flight down, buying here would be churn.
-                effective_qty = max(0, sgov_qty - sgov_open_sell)
-                new_diff = min(0, target_shares - effective_qty)
-                new_diff = -min(abs(new_diff), effective_qty)
-                if new_diff != diff:
-                    logger.info(f"[SGOV] {sgov_open_sell} shares already pending sale - adjusted sweep diff {diff} -> {new_diff}")
-                    diff = new_diff
-        except Exception as e:
-            logger.debug(f"Open order check failed: {e}")
-
-        # Funding-queue BP guard (2026-08-24): every $1 swept into SGOV is $1
-        # less settled cash, i.e. ~$1 less options buying power for the queued
-        # CSP it is funding. The reserve above only shrinks the IDEAL target;
-        # when the stock-BP buy cap binds instead, the reserve does nothing and
-        # the sweep re-buys the very cash the pre-fund sale just freed.
-        # 2026-08-24: pre-fund sold 54 SGOV in the morning for the BAC queue,
-        # the midday sweep bought 64 back (stock-BP cap binding), options BP
-        # went to $0, and the afternoon BAC sell failed 40310000. While a queue
-        # is pending, cap buys so options BP coverage of the queue is preserved.
-        if diff > 0 and queue_need_pending > 0:
-            bp_headroom = max(0.0, opt_bp_sweep - queue_need_pending)
-            bp_cap_shares = int(bp_headroom // sgov_price)
-            if diff > bp_cap_shares:
-                logger.info(f"[SGOV] Queue BP guard: pending CSP need ${queue_need_pending:.0f} vs options BP ${opt_bp_sweep:.0f} - capping sweep buy {diff} -> {bp_cap_shares} (swept cash is tomorrow's options BP)")
-                diff = bp_cap_shares
-
-        if diff > 0:
-            logger.info(f"[SGOV SWEEP] Buying {diff} SGOV @ ${sgov_price:.2f} to earn interest on ${diff*sgov_price:.0f} collateral (Fidelity SPAXX sweep)")
-            place_sgov_limit_order(client, "buy", diff, logger_obj=logger)
-        elif diff < 0:
-            logger.info(f"[SGOV] Selling {abs(diff)} SGOV at market (target {target_shares} < held {sgov_qty}: rebalance to sweep target, frees ${abs(diff)*sgov_price:.0f} cash)")
-            place_sgov_limit_order(client, "sell", abs(diff), logger_obj=logger)
-        else:
-            logger.info(f"[SGOV] At sweep target {target_shares} shares earning ${monthly_interest_real:.2f}/mo - perfect SPAXX wrapper")
-    except Exception as e:
-        logger.warning(f"SGOV sync failed: {e}")
 
 def main():
     args = parse_args()
@@ -819,7 +671,7 @@ def main():
             logger.debug(f"[RH] vix cross-check failed: {e}")
 
     if SGOV_ENABLED:
-        sync_sgov_real(client, logger)
+        sync_sgov_real(client, logger, risk_cap=effective_max_risk)
     else:
         logger.info("[SGOV] Sweep disabled (SGOV_ENABLED=False) - cash stays in the broker's own sweep (Robinhood/Fidelity model)")
 
