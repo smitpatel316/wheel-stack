@@ -16,10 +16,14 @@ Contract:
   FAIL     engine did not complete, traceback, or contract violated
 """
 import json
+import logging
 import os
 import re
 import sys
 import urllib.request
+
+logging.basicConfig(stream=sys.stderr, format="%(message)s")
+logger = logging.getLogger("postrun_verify")
 
 LOG = sys.argv[1]
 text = open(LOG, errors="replace").read()
@@ -88,6 +92,7 @@ try:
     else:
         check("optionable-api", True, "OPTIONABLE_URL unset, skipped")
 except Exception as e:
+    logger.warning("[SWALLOWED] optionable-api check: %s", type(e).__name__)
     check("optionable-api", False, f"unreachable: {type(e).__name__}")
 
 # Extract actionable lines for the report
