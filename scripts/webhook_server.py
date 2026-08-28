@@ -150,6 +150,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         code = resp.status
                 except urllib.error.HTTPError as he:
                     # 4xx from the sink is a valid answer (e.g. state-rejection page) — relay it.
+                    log.info("[RH-RELAY] sink returned %d, relaying response", he.code)
                     body = he.read()
                     code = he.code
             except Exception as e:
