@@ -6,7 +6,7 @@ from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
 from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
 from app_logging.strategy_logger import StrategyLogger
 from app_logging.logger_setup import setup_logger
-from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, sync_closed_trades
+from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, sync_closed_trades, reconcile_open_entry_prices
 from core.cli_args import parse_args
 from core.activities_sync import sync_dividends_and_interest, sync_option_events
 from core.context_analyzer import analyze_context, adapt_params, save_context_log
@@ -829,6 +829,10 @@ def main():
             if SGOV_ENABLED:
                 sync_sgov_to_optionable(client)
             sync_closed_trades(client)
+            try:
+                reconcile_open_entry_prices(client)
+            except Exception as e:
+                logger.debug("[SWALLOWED] optionable entry reconciliation failed: %r", e)  # swallow:non-fatal-sync
             try:
                 sync_dividends_and_interest(client)
                 sync_option_events(client)

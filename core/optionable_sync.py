@@ -865,3 +865,67 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
     except Exception as e:
         logger.warning(f"sync_realized_pnl_from_alpaca failed: {e}", exc_info=True)
         return summary
+
+
+def reconcile_open_entry_prices(client) -> int:
+    """Correct Optionable Open trade entryPrice to the broker's avg entry.
+
+    Engine-pushed opens record a quote/limit price at order time; the broker's
+    avg_entry_price after fills is the truth. A few cents of drift per leg
+    compounds into wrong per-trade P/L (observed 2026-08-27: JNJ entry logged
+    2.08 vs broker STO 1.82 => -$72 reported vs -$98 real). Idempotent:
+    skips rows within $0.005, never touches rows without an OCC: syncId note,
+    no-ops when the tracker is down. Returns rows patched.
+    """
+    if not alive():
+        return 0
+    patched = 0
+    try:
+        account_id = get_default_account_id()
+        rows = get_optionable_open_trades(account_id)
+        if not rows:
+            return 0
+        broker_avg: Dict[str, float] = {}
+        for p in client.get_positions():
+            if 'OPTION' not in str(getattr(p, 'asset_class', '')).upper():
+                continue
+            sym = getattr(p, 'symbol', '') or ''
+            try:
+                avg = float(getattr(p, 'avg_entry_price', 0) or 0)
+            except Exception as e:
+                logger.debug("[SWALLOWED] parse of avg_entry_price for %s: %r", sym, e)  # swallow:non-fatal-position
+                continue
+            if sym and avg > 0:
+                broker_avg[sym] = avg
+        if not broker_avg:
+            return 0
+        for t in rows:
+            m = re.search(r'OCC:([A-Z0-9]{10,25})', t.get('notes') or '')
+            if not m:
+                continue
+            avg = broker_avg.get(m.group(1))
+            if not avg:
+                continue
+            occ = m.group(1)
+            try:
+                cur = float(t.get('entryPrice') or 0)
+            except Exception as e:
+                logger.debug("[SWALLOWED] parse of Optionable entryPrice for %s: %r", t.get('id'), e)  # swallow:non-fatal-row
+                continue
+            if abs(cur - avg) < 0.005:
+                continue
+            try:
+                r = requests.put(f"{OPTIONABLE_URL}/api/trades/{t['id']}",
+                                 json={"entryPrice": round(avg, 4)}, timeout=TIMEOUT)
+                if r.status_code == 200:
+                    patched += 1
+                    logger.info(f"Optionable entry reconciled #{t['id']} {occ}: {cur} -> {avg}")
+                else:
+                    logger.debug(f"entry reconcile PUT {t['id']} -> {r.status_code}")
+            except Exception as e:
+                logger.debug("[SWALLOWED] entry reconcile PUT failed for %s: %r", t.get('id'), e)  # swallow:non-fatal-push
+        if patched:
+            logger.info(f"Optionable entry reconciliation patched {patched} open trade(s)")
+    except Exception as e:
+        logger.warning("[SWALLOWED] reconcile_open_entry_prices failed (non-fatal): %r", e)  # swallow:non-fatal-sync
+    return patched
