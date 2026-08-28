@@ -447,7 +447,8 @@ class EngineDashboardPush:
             if r.status_code == 200:
                 logger.info(f"[DASH] pushed snapshot+scan funnel ({len(rows)} symbols, {len(open_positions)} positions) to Optionable")
                 return True
-            logger.warning(f"[DASH] Optionable push HTTP {r.status_code}: {r.text[:200]}")
+            body = (r.text or "").replace("\n", " ")[:120]
+            logger.warning(f"[DASH] Optionable push HTTP {r.status_code}: {body}")
             return False
         except Exception as e:
             logger.warning(f"[DASH] push failed (non-fatal): {e}")
