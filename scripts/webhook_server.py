@@ -144,9 +144,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 {k: v[0] for k, v in qs.items()})
             try:
                 req = urllib.request.Request(target, headers={"User-Agent": "curl/8.5.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    body = resp.read()
-                    code = resp.status
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        body = resp.read()
+                        code = resp.status
+                except urllib.error.HTTPError as he:
+                    # 4xx from the sink is a valid answer (e.g. state-rejection page) — relay it.
+                    body = he.read()
+                    code = he.code
             except Exception as e:
                 log.error("[RH-RELAY] relay to %s failed: %r", target, e)
                 self._html(502, "Relay failed",
