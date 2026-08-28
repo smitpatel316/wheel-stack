@@ -139,7 +139,9 @@ def fetch_dividends_finnhub(symbol: str, from_date: date, to_date: date) -> List
         status = getattr(getattr(e, 'response', None), 'status_code', None)
         if status == 403:
             _FINNHUB_DIV_DISABLED = True
-            logger.info("[SWALLOWED] Finnhub dividend endpoint 403 (plan restriction) - disabling Finnhub dividend fallback for this run, Alpha/cache remain authoritative")
+            # Free-plan 403 is permanent, not an outage: fired every single run (2026-08-26..28) while
+            # Alpha/cache stayed authoritative. Debug-level to keep the sentinel rare and meaningful.
+            logger.debug("[SWALLOWED] Finnhub dividend endpoint 403 (plan restriction) - disabling Finnhub dividend fallback for this run, Alpha/cache remain authoritative")  # swallow:intentional
         else:
             logger.warning("[SWALLOWED] Finnhub dividend fetch failed for %s (HTTP %s): %s", symbol, status, type(e).__name__)
         return []
