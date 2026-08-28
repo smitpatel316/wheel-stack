@@ -80,6 +80,11 @@ def record_event() -> dict:
 # rh_mcp_client.py `auth`; the code is stashed for rh_mcp_client.py `finish`.
 RH_DIR = Path(os.environ.get(
     "RH_MCP_DIR", str(Path.home() / "workspace" / "robinhood-mcp")))
+# Pi migration 2026-08-27: Finnhub receiver lives on the Pi; the Robinhood
+# OAuth callback still needs to land on Hatch. When set, this handler relays
+# the callback to RH_RELAY_URL (Hatch sink via rh-callback hostname).
+# cloudflared cannot do this itself: CF bot rules block its Go TLS fingerprint.
+RH_RELAY_URL = os.environ.get("RH_RELAY_URL", "")
 RH_PENDING = RH_DIR / "pending_auth.json"
 RH_CALLBACK = RH_DIR / "callback_result.json"
 
@@ -133,6 +138,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _rh_oauth_callback(self, qs: dict):
+        if RH_RELAY_URL:
+            import urllib.request, urllib.parse
+            target = RH_RELAY_URL + "?" + urllib.parse.urlencode(
+                {k: v[0] for k, v in qs.items()})
+            try:
+                req = urllib.request.Request(target, headers={"User-Agent": "wheel-webhook-relay/1.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = resp.read()
+                    code = resp.status
+            except Exception as e:
+                log.error("[RH-RELAY] relay to %s failed: %r", target, e)
+                self._html(502, "Relay failed",
+                           "Could not reach the Hatch callback sink. Try again.")
+                return
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         state = (qs.get("state") or [""])[0]
         code = (qs.get("code") or [""])[0]
         error = (qs.get("error") or [""])[0]
