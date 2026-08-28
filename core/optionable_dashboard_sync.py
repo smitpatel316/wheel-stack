@@ -29,10 +29,12 @@ Read/display only — never places orders. Fail-safe: any error here must never
 break the trading run, so every public method swallows exceptions after logging.
 """
 import datetime
+import json
 import logging
 import os
 import re
 import sys
+from pathlib import Path
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -44,6 +46,30 @@ OPTIONABLE_URL = os.getenv("OPTIONABLE_URL", "http://localhost:8096")
 TIMEOUT = 8
 
 _ET = ZoneInfo("America/New_York")
+
+_LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+# The dashboard moved off this host (Pi migration 2026-08-27); its income and
+# benchmark charts need the equity/SGOV history that used to sit beside it on
+# disk, so the history now rides the regular dashboard push. Cap entries to
+# stay well under the API's JSON body limit.
+_HISTORY_MAX_ENTRIES = 1000
+
+
+def _read_history(filename: str, value_key: str) -> List[dict]:
+    """Load a logs/*.json history file, trimmed and sanitized. Never raises;
+    returns [] on any problem — history is best-effort display data."""
+    try:
+        raw = json.loads((_LOGS_DIR / filename).read_text())
+        if not isinstance(raw, list):
+            return []
+        return [
+            {"t": e["t"], value_key: float(e[value_key]), **({"avg": e["avg"]} if e.get("avg") is not None else {})}
+            for e in raw[-_HISTORY_MAX_ENTRIES:]
+            if isinstance(e, dict) and e.get("t") and isinstance(e.get(value_key), (int, float))
+        ]
+    except Exception as e:
+        logger.debug("[SWALLOWED] history read for dash push failed: %r", e)
+        return []
 
 
 class _TeeStream:
@@ -443,9 +469,15 @@ class EngineDashboardPush:
             if not payload:
                 logger.info("[DASH] nothing collected this run - skipping push")
                 return False
+            equity_hist = _read_history("equity_history.json", "equity")
+            if equity_hist:
+                payload["equityHistory"] = equity_hist
+            sgov_hist = _read_history("sgov_history.json", "shares")
+            if sgov_hist:
+                payload["sgovHistory"] = sgov_hist
             r = requests.post(f"{self.base_url}/api/engine/dashboard", json=payload, timeout=TIMEOUT)
             if r.status_code == 200:
-                logger.info(f"[DASH] pushed snapshot+scan funnel ({len(rows)} symbols, {len(open_positions)} positions) to Optionable")
+                logger.info(f"[DASH] pushed snapshot+scan funnel ({len(rows)} symbols, {len(open_positions)} positions, {len(equity_hist)} equity pts) to Optionable")
                 return True
             body = (r.text or "").replace("\n", " ")[:120]
             logger.warning(f"[DASH] Optionable push HTTP {r.status_code}: {body}")
@@ -455,14 +487,24 @@ class EngineDashboardPush:
             return False
 
 
-def push_now(snapshot: dict = None, scan_run: dict = None, base_url: Optional[str] = None):
-    """One-shot push for callers that already have structured data."""
+def push_now(snapshot: dict = None, scan_run: dict = None, base_url: Optional[str] = None,
+             include_history: bool = False):
+    """One-shot push for callers that already have structured data.
+    Set include_history=True to also seed the equity/SGOV history blobs
+    (used for the Pi migration seed; runs get history automatically)."""
     try:
         payload = {}
         if snapshot:
             payload["snapshot"] = snapshot
         if scan_run:
             payload["scanRun"] = scan_run
+        if include_history:
+            equity_hist = _read_history("equity_history.json", "equity")
+            if equity_hist:
+                payload["equityHistory"] = equity_hist
+            sgov_hist = _read_history("sgov_history.json", "shares")
+            if sgov_hist:
+                payload["sgovHistory"] = sgov_hist
         if not payload:
             return False
         r = requests.post(f"{base_url or OPTIONABLE_URL}/api/engine/dashboard",
