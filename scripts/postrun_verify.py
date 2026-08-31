@@ -69,15 +69,40 @@ def extract_actions(lines):
     return out
 
 
+def _optionable_base():
+    """OPTIONABLE_URL from the environment, falling back to the repo .env.
+
+    The cron wrapper sources .env before verify, but a verify call from a
+    bare shell (midday run 2026-08-31) silently skipped this check — a
+    coverage gap. Parse .env ourselves; only this one key is read and no
+    file values are ever logged.
+    """
+    base = os.environ.get("OPTIONABLE_URL", "").strip()
+    if not base:
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+        )
+        try:
+            with open(env_path, errors="replace") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln.startswith("OPTIONABLE_URL="):
+                        base = ln.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        except OSError as e:
+            logger.warning("[SWALLOWED] .env fallback read failed: %s", type(e).__name__)
+    return base.rstrip("/")
+
+
 def _fetch_optionable_health():
     """Pi Optionable /api/health with short retries.
 
     A single transient drop (RemoteDisconnected under load) should not flip
     an otherwise-good run to DEGRADED; 3 attempts 2s apart absorb that.
     """
-    base = os.environ.get("OPTIONABLE_URL", "").rstrip("/")
+    base = _optionable_base()
     if not base:
-        return True, "OPTIONABLE_URL unset, skipped"
+        return True, "OPTIONABLE_URL unset in env and .env, skipped"
     last_err = "unknown"
     for attempt in (1, 2, 3):
         try:
