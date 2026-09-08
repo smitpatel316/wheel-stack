@@ -10,6 +10,8 @@
 #          Fidelity model: SPAXX core holds all cash including CSP collateral, earns ~4.5% APY, still counts as collateral.
 #          RH Gold: 4.3% auto on uninvested cash same wrapper.
 #          SGOV iShares 0-3M T-Bill ETF 5.22% APY wrapper for Alpaca paper limitation.
+
+import os
 #          Alpaca paper: SGOV is stock not cash collateral, so stock BP limits sweep (ideal 1007 shares $101k vs real 454 $45k)
 #          v2.8 float model (2026-08-28): target_mv = max(0, equity - effective risk cap);
 #          cash inside the cap is NEVER swept (deployed collateral + slack stay liquid).
@@ -129,14 +131,21 @@ SGOV_TARGET_PCT = 0.99  # sweep 99% liquid to SGOV
 # doesn't churn orders.
 SGOV_REBALANCE_BAND = 2000.0
 
-# RH MCP official v2.5.4
-# URL: https://agent.robinhood.com/mcp/trading
-# Setup: hermes mcp add robinhood --url https://agent.robinhood.com/mcp/trading
-# Tools documented 2026-08-03: get_accounts, get_portfolio, get_realized_pnl, get_option_chains, get_option_instruments,
-# place_option_order, etc. Current limitation: long only, cannot sell CSP yet (wheel core) -> stay Alpaca, flag for future.
-RH_MCP_ENABLED = False  # set True when RH adds short puts/calls support per https://robinhood.com/us/en/agentic-trading/
+# RH order path (built 2026-09-08; real-money venue = Roth IRA).
+# Robinhood's agentic API supports Level 2 single-leg strategies including
+# cash-secured puts and covered calls (verified 2026-09-08 via tool catalog;
+# the old "long only" limitation is gone).
+# BROKER: 'alpaca' (default, all money paths) or 'robinhood' (orders/positions/
+# account on Robinhood, market data stays on the Alpaca feed).
+# RH_LIVE_ORDERS=true is REQUIRED for the RH adapter to construct — double
+# gate with live=True in code. Robinhood has no paper trading.
+# RH_DRY_RUN=true: full order path through review_option_order, never places.
+BROKER = os.getenv("BROKER", "alpaca").lower()
+RH_LIVE_ORDERS = os.getenv("RH_LIVE_ORDERS", "false").lower() in ("1", "true", "yes")
+RH_DRY_RUN = os.getenv("RH_DRY_RUN", "false").lower() in ("1", "true", "yes")
+RH_MCP_ENABLED = False  # legacy shadow-quote feed flag (read-only); order path is separate
 RH_MCP_URL = "https://agent.robinhood.com/mcp/trading"
-RH_WHEEL_SUPPORTED = False  # False until place_option_order sell_to_open verified works
+RH_WHEEL_SUPPORTED = True  # place_option_order sell_to_open verified in 2026-09-08 tool catalog
 
 # P/L Tracker v2.5.4 - real vs optionable discrepancy
 # Optionable bug: closePrice=0 => profit=entry phantom $568 vs real $52

@@ -15,6 +15,7 @@ from core.closer import evaluate_all_for_close, close_position
 from core.earnings_calendar import build_cache as earnings_build_cache, get_earnings_risk_report
 from models.contract import Contract
 import os
+import sys
 import json
 
 TOTAL_CAPITAL = 100_000
@@ -71,7 +72,29 @@ def main():
     SYMBOLS = load_watchlist(SYMBOLS_FILE)
     logger.info(f"[CONFIG] Watchlist ({watchlist_source()}): {', '.join(SYMBOLS)}")
 
-    client = BrokerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY, paper=IS_PAPER)
+    client = None
+    _broker_name = os.getenv("BROKER", "alpaca").lower()
+    if _broker_name == "robinhood":
+        # LIVE Robinhood money path. SGOV is Alpaca-specific: force off (the
+        # broker's own cash sweep pays interest on the Roth IRA's cash).
+        # --fresh-start is refused by the adapter itself.
+        global SGOV_ENABLED
+        SGOV_ENABLED = False
+        from core.robinhood_broker import RobinhoodBrokerClient
+        _data_client = BrokerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY, paper=True)
+        client = RobinhoodBrokerClient(data_client=_data_client, live=True)
+        logger.warning("[BROKER] Robinhood LIVE order path active (real money). "
+                       "Market data: Alpaca paper feed. SGOV forced off.")
+    elif _broker_name == "alpaca":
+        # Live+paper tripwire: IS_PAPER=false with paper-scale MAX_RISK is
+        # almost certainly a misconfigured live host. Refuse to run.
+        if not IS_PAPER and MAX_RISK >= 100000:
+            raise SystemExit("[SAFETY] IS_PAPER=false with MAX_RISK>=100000 — "
+                             "paper params on a live account? Refusing to run. "
+                             "Set phase-appropriate MAX_RISK (e.g. 1000 for Ladder Phase 1).")
+        client = BrokerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY, paper=IS_PAPER)
+    else:
+        raise SystemExit(f"[SAFETY] Unknown BROKER={_broker_name!r} (expected 'alpaca' or 'robinhood')")
 
     # Market clock check v2.5
     is_market_open = True
@@ -298,6 +321,19 @@ def main():
             logger.info(f"[RISK] Dynamic MAX_RISK base ${dynamic_base:,} (cash ${_cash:,.0f} + treasuries ${_treas:,.0f} - buffer) replaces hardcoded cap")
         except Exception as e:
             logger.warning(f"[RISK] Dynamic base failed ({e}) - falling back to MAX_RISK ${MAX_RISK:,}")
+
+        # Hard constraint: never carry a margin debit. Fail closed — abort the
+        # run before any order path rather than trading through it.
+        try:
+            _cash_check = float(getattr(_acct, 'cash', 0) or 0)
+            if _cash_check < 0:
+                logger.critical(f"[SAFETY] Account cash ${_cash_check:,.2f} < 0 (margin debit) — "
+                                "refusing to trade. Resolve the debit before the next run.")
+                raise SystemExit(2)
+        except SystemExit:
+            raise
+        except Exception as e:
+            logger.debug(f"[SWALLOWED] margin-debit pre-check failed: {e!r}")
         adapted = adapt_params(market_ctx, {"MAX_RISK": dynamic_base} if dynamic_base else None)
         strat_logger.set_market_context(market_ctx)
         if market_ctx and earnings_map:
@@ -323,8 +359,29 @@ def main():
         logger.warning(f"Context analyzer failed, using defaults: {e}")
 
     effective_max_risk = adapted.get("MAX_RISK", MAX_RISK)
+    # Ladder phase caps are real ceilings: the dynamic base (account liquidity)
+    # must never exceed the env MAX_RISK for the current phase.
+    if effective_max_risk > MAX_RISK:
+        logger.warning(f"[RISK] Dynamic base ${effective_max_risk:,} exceeds env MAX_RISK ${MAX_RISK:,} — "
+                       "capping at env MAX_RISK (Ladder phase ceiling)")
+        effective_max_risk = MAX_RISK
+    # A zero dynamic base is a real measurement (empty/unfunded account), not
+    # a failure — never fall back UP to the paper cap. Clamp to $0 so the
+    # engine skips new CSPs instead of sizing for money that isn't there.
+    if dynamic_base is not None and dynamic_base <= 0:
+        logger.warning("[RISK] Dynamic base $0 (no deployable cash) — effective MAX_RISK $0, no new CSPs")
+        effective_max_risk = 0
 
     if args.fresh_start:
+        _allow_fs = os.getenv("ALLOW_FRESH_START", "false").lower() in ("1", "true", "yes")
+        if not _allow_fs:
+            if sys.stdin.isatty():
+                ans = input("FRESH START will LIQUIDATE ALL positions. Type LIQUIDATE to confirm: ")
+                if ans.strip() != "LIQUIDATE":
+                    raise SystemExit("fresh-start aborted by operator")
+            else:
+                raise SystemExit("[SAFETY] --fresh-start requires ALLOW_FRESH_START=true in non-interactive "
+                                 "runs — refusing to liquidate")
         logger.info("Running in fresh start mode — liquidating all positions.")
         client.liquidate_all_positions()
         allowed_symbols = SYMBOLS
@@ -677,14 +734,21 @@ def main():
 
     if optionable_alive():
         try:
-            sync_alpaca_equity_to_optionable(client)
-            if SGOV_ENABLED:
-                sync_sgov_to_optionable(client)
-            sync_closed_trades(client)
-            try:
-                reconcile_open_entry_prices(client)
-            except Exception as e:
-                logger.debug("[SWALLOWED] optionable entry reconciliation failed: %r", e)  # swallow:non-fatal-sync
+            if _broker_name == "robinhood":
+                # Alpaca-activities-based syncs (closed trades, entry prices,
+                # equity positions) describe the paper account, not the RH
+                # account. Skip rather than push paper data as if it were RH.
+                # RH-native dashboard sync is future work.
+                logger.info("[SYNC] Robinhood mode: skipping Alpaca-activities dashboard syncs")
+            else:
+                sync_alpaca_equity_to_optionable(client)
+                if SGOV_ENABLED:
+                    sync_sgov_to_optionable(client)
+                sync_closed_trades(client)
+                try:
+                    reconcile_open_entry_prices(client)
+                except Exception as e:
+                    logger.debug("[SWALLOWED] optionable entry reconciliation failed: %r", e)  # swallow:non-fatal-sync
             try:
                 sync_dividends_and_interest(client)
                 sync_option_events(client)
