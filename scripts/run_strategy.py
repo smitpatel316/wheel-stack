@@ -750,8 +750,9 @@ def main():
                 except Exception as e:
                     logger.debug("[SWALLOWED] optionable entry reconciliation failed: %r", e)  # swallow:non-fatal-sync
             try:
-                sync_dividends_and_interest(client)
-                sync_option_events(client)
+                if _broker_name != "robinhood":
+                    sync_dividends_and_interest(client)
+                    sync_option_events(client)
             except Exception as e:
                 logger.debug(f"activities sync failed: {e}")
             # Dashboard confirmed up: deliver any outbox backlog too.
