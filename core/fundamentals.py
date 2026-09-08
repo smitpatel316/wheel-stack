@@ -87,6 +87,42 @@ def fetch_balance_sheet_alpha(symbol: str) -> Dict:
         # print(f"[FUND] Balance {symbol} failed: {e}")
         return {}
 
+def _fetch_primary_entry(sym: str) -> Dict:
+    """One symbol via primary Alpha OVERVIEW + BALANCE_SHEET. Returns {} on failure.
+
+    Used by the cache-hit path to re-attempt primary data for entries that were
+    written from the Finnhub fallback during a past Alpha outage, so a transient
+    outage can't silently weaken the next run's screen (2026-09-01 outage ->
+    2026-09-02 served WFC D/E 0.96 fallback vs 2.35 primary and opened a CSP
+    the primary screen would have blocked).
+    """
+    data = fetch_overview_alpha(sym)
+    if not (data and data.get("Symbol")):
+        return {}
+    entry = {
+        "symbol": sym.upper(),
+        "PERatio": data.get("PERatio"),
+        "DividendYield": data.get("DividendYield"),
+        "MarketCapitalization": data.get("MarketCapitalization"),
+        "ProfitMargin": data.get("ProfitMargin"),
+        "Volume": data.get("Volume") or data.get("AverageVolume"),
+        "ROE": data.get("ReturnOnEquityTTM"),
+        "Beta": data.get("Beta"),
+        "Sector": data.get("Sector"),
+        "AnalystTargetPrice": data.get("AnalystTargetPrice"),
+        "ExDividendDate": data.get("ExDividendDate"),
+        "QuarterlyEarningsGrowthYOY": data.get("QuarterlyEarningsGrowthYOY"),
+        "QuarterlyRevenueGrowthYOY": data.get("QuarterlyRevenueGrowthYOY"),
+        "DebtEquity": None,
+        "source": "alpha_overview",
+    }
+    bs = fetch_balance_sheet_alpha(sym)
+    if bs and bs.get("DebtEquity") is not None:
+        entry["DebtEquity"] = bs["DebtEquity"]
+        entry["totalDebt"] = bs.get("totalDebt")
+    return entry
+
+
 def build_cache(symbols: List[str]) -> Dict[str, Dict]:
     cache: Dict[str, Dict] = {}
     stale: Dict[str, Dict] = {}  # any-age on-disk entries, used as fallback on fetch failure
@@ -99,9 +135,31 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 if sym in set(s.upper() for s in symbols):
                     stale[sym] = entry
             if time.time() - ts < CACHE_TTL:
+                # Cache hit — but fallback-sourced entries (written while Alpha
+                # was down) must not masquerade as primary data. Re-attempt Alpha
+                # for just those symbols; keep the fallback only if Alpha still
+                # fails, and say so loudly.
+                fb_syms = [s for s, e in stale.items() if e.get("source") == "finnhub_metric"]
+                re_primary = 0
+                for sym in fb_syms:
+                    entry = _fetch_primary_entry(sym)
+                    time.sleep(1.0)  # stay under Alpha rate limits
+                    if entry:
+                        stale[sym] = entry
+                        re_primary += 1
+                still_fb = sorted(s for s, e in stale.items() if e.get("source") == "finnhub_metric")
                 cache.update(stale)
                 if cache:
-                    print(f"[FUND] Cache hit {len(cache)}")
+                    if still_fb:
+                        print(f"[FUND] WARNING: {len(still_fb)} symbol(s) served from finnhub-fallback cache "
+                              f"(Alpha unreachable; debt ratios are longTermDebt-only and may understate "
+                              f"leverage vs primary): {', '.join(still_fb)} — screen degraded for these names")
+                        logger.warning("[FUND] %d symbol(s) on stale finnhub-fallback data (screen degraded): %s",
+                                       len(still_fb), ",".join(still_fb))
+                    elif re_primary:
+                        print(f"[FUND] Cache hit {len(cache)} ({re_primary} fallback entries refreshed from primary Alpha)")
+                    else:
+                        print(f"[FUND] Cache hit {len(cache)}")
                     return cache
         except Exception as e:
             logger.debug("[SWALLOWED] loading fundamentals cache %s, rebuilding from APIs: %r", CACHE_FILE, e)

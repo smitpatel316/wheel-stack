@@ -505,7 +505,7 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
                 f"if rejected, the lineage stays closed and the name is re-evaluated as a fresh CSP next run"
             )
 
-        log.info(f"[ROLL] Opening {target.symbol} sell {candidate.qty} net credit ${target.net_credit:.2f} gross ${target.net_credit*100*qty_abs:.2f} after-fees ${net_credit_after_fees:.2f} {target.reasoning}")
+        log.info(f"[ROLL] Opening {target.symbol} sell {candidate.qty} est. net credit ${target.net_credit:.2f} est. gross ${target.net_credit*100*qty_abs:.2f} after-fees ${net_credit_after_fees:.2f} {target.reasoning}")
 
         open_req = MarketOrderRequest(
             symbol=target.symbol,
@@ -515,7 +515,33 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
             time_in_force=TimeInForce.DAY,
         )
         open_order = client.trade_client.submit_order(open_req)
-        log.info(f"[ROLL] Open order {getattr(open_order,'id','')} submitted {target.symbol} | Roll complete closed+P/L logs with fees")
+        open_id = getattr(open_order, 'id', '')
+        log.info(f"[ROLL] Open order {open_id} submitted {target.symbol} | Roll complete closed+P/L logs with fees")
+
+        # Poll the open fill so the log carries the ACTUAL fill price, not the
+        # scan-time bid estimate (2026-09-08: log claimed $1.56 net credit, real
+        # fill was $3.80). Bounded wait; the reconciliation path stays as backup.
+        open_fill_px = None
+        if open_id:
+            open_deadline = time.time() + 30
+            while time.time() < open_deadline:
+                time.sleep(2.0)
+                try:
+                    oo = client.trade_client.get_order_by_id(open_id)
+                    if str(getattr(oo, 'status', '')).lower() == 'filled':
+                        open_fill_px = getattr(oo, 'filled_avg_price', None)
+                        break
+                except Exception as e:
+                    log.debug("[SWALLOWED] open fill poll failed for %s (order %s): %r", target.symbol, open_id, e)
+        if open_fill_px is not None:
+            try:
+                open_fill_px = float(open_fill_px)
+                log.info(f"[ROLL] Open FILLED {target.symbol} @ ${open_fill_px:.2f} (order {open_id}, est. bid was ${target.bid_price:.2f})")
+            except (TypeError, ValueError):
+                log.debug("[SWALLOWED] open fill price parse failed for %s: %r", target.symbol, open_fill_px)
+                open_fill_px = None
+        else:
+            log.warning(f"[ROLL] Open order {open_id} for {target.symbol} not confirmed filled within 30s - fill price from reconciliation")
 
         try:
             from core.optionable_sync import push_trade_to_optionable

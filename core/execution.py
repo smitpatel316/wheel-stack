@@ -74,16 +74,47 @@ def calc_mid_price(contract_obj) -> float:
         logger.debug("[SWALLOWED] mid-price calc failed for %s, returning 0.0: %r", getattr(contract_obj, 'symbol', '?'), e)
         return 0.0
 
+def _market_sell_and_confirm(client, symbol, bid, mid, order_type):
+    """Submit a market sell, poll for the fill, and return a result dict carrying
+    the ACTUAL fill price and order id (2026-09-08 audit: the old code returned
+    the pre-trade bid as "price" and dropped the order id entirely)."""
+    order = client.market_sell(symbol)
+    order_id = getattr(order, 'id', None)
+    fill_px = None
+    if order_id and hasattr(client, 'get_order'):
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(2.0)
+            try:
+                o = client.get_order(order_id)
+                if 'filled' in str(getattr(o, 'status', '')).lower():
+                    fill_px = getattr(o, 'filled_avg_price', None)
+                    break
+            except Exception as e:
+                logger.debug("[SWALLOWED] market fill poll failed for %s (order %s): %r", symbol, order_id, e)
+    if fill_px is not None:
+        try:
+            fill_px = float(fill_px)
+            logger.info(f"[EXEC] Market FILLED {symbol} @ ${fill_px:.2f} (order {order_id}, bid was ${bid:.2f})")
+        except (TypeError, ValueError):
+            logger.debug("[SWALLOWED] market fill price parse failed for %s: %r", symbol, fill_px)
+            fill_px = None
+    if fill_px is None:
+        logger.warning(f"[EXEC] Market sell {symbol} (order {order_id}) fill not confirmed within 20s - price from reconciliation")
+        fill_px = bid
+    return {"type": order_type, "price": fill_px, "mid": mid, "bid": bid,
+            "order_id": order_id, "improvement": (fill_px - bid if bid else 0.0)}
+
+
 def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_limit=True, wait_seconds=8):
     """v2.5.1 limit at mid then market fallback"""
     symbol = contract_obj.symbol
     mid = calc_mid_price(contract_obj)
     bid = float(getattr(contract_obj, 'bid_price', 0) or 0)
-    
+
     if not enable_limit or mid <= 0:
         try:
-            client.market_sell(symbol)
-            return {"type": "market", "price": bid, "mid": mid, "improvement": 0.0}
+            return _market_sell_and_confirm(client, symbol, bid, mid, "market")
         except Exception as e:
             logger.warning(f"Market sell failed for {symbol}: {e}")
             raise
@@ -127,16 +158,13 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
                     except Exception as e:
                         logger.warning("[SWALLOWED] cancel_order failed for %s (order %s) after fill-check error: %r", symbol, order_id, e)
                         pass
-            client.market_sell(symbol)
-            return {"type": "market_fallback_unfilled", "price": bid, "mid": mid, "limit_attempt": limit_price, "improvement": 0.0}
+            return _market_sell_and_confirm(client, symbol, bid, mid, "market_fallback_unfilled") | {"limit_attempt": limit_price}
         else:
-            client.market_sell(symbol)
-            return {"type": "market", "price": bid, "mid": mid, "improvement": 0.0}
+            return _market_sell_and_confirm(client, symbol, bid, mid, "market")
     except Exception as e:
         logger.warning(f"Limit sell failed for {symbol} mid ${mid}: {e}, market fallback")
         try:
-            client.market_sell(symbol)
-            return {"type": "market_fallback", "price": bid, "mid": mid, "improvement": 0.0}
+            return _market_sell_and_confirm(client, symbol, bid, mid, "market_fallback")
         except Exception as e2:
             logger.warning(f"Market fallback also failed {symbol}: {e2}")
             raise

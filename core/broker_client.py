@@ -33,7 +33,7 @@ class BrokerClient:
         req = MarketOrderRequest(
             symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day'
         )
-        self.trade_client.submit_order(req)
+        return self.trade_client.submit_order(req)
 
     def market_buy(self, symbol, qty=1):
         from alpaca.trading.requests import MarketOrderRequest as MOR
