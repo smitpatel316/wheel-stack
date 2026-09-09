@@ -29,6 +29,18 @@ def report(status, check, msg):
     print(f"[{icon}] {check}: {msg}")
 
 
+def _looks_placeholder(value):
+    """True when a credential is the repo's committed placeholder default.
+
+    config/credentials.py ships "***REMOVED***..." placeholder defaults for
+    the data-feed keys so the module imports without env. A placeholder is
+    not a usable key: reporting it as "present" makes a fresh clone look
+    pre-flight green when its data feeds are actually unconfigured
+    (2026-09-09 P4 audit).
+    """
+    return isinstance(value, str) and "***REMOVED***" in value
+
+
 def check_config():
     from config import params
     from config import credentials as cred
@@ -49,8 +61,11 @@ def check_config():
         report(PASS, "config", f"IS_PAPER={cred.IS_PAPER} matches key type ({prefix}…)")
 
     for name in ("FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY"):
-        if getattr(cred, name):
+        val = getattr(cred, name)
+        if val and not _looks_placeholder(val):
             report(PASS, "config", f"{name} present")
+        elif _looks_placeholder(val):
+            report(WARN, "config", f"{name} not configured (placeholder default) — related data source will rely on fallbacks")
         else:
             report(WARN, "config", f"{name} missing — related data source will rely on fallbacks")
 
@@ -122,7 +137,10 @@ def check_data_sources():
     from core import data_fallbacks
 
     # Finnhub: real ping through the same fallback fetcher the engine uses.
-    if cred.FINNHUB_API_KEY:
+    # A placeholder default is not a key: skip the network ping and say so.
+    if _looks_placeholder(cred.FINNHUB_API_KEY):
+        report(WARN, "data", "Finnhub key not configured (placeholder default) — fundamentals fallback unavailable")
+    elif cred.FINNHUB_API_KEY:
         try:
             data = data_fallbacks.fetch_overview_finnhub("AAPL")
             if data and data.get("PERatio"):
@@ -137,7 +155,9 @@ def check_data_sources():
 
     # Alpha Vantage: free tier is 25 req/day, so tolerate rate-limit responses;
     # only a hard error / invalid key is a failure.
-    if cred.ALPHA_VANTAGE_API_KEY:
+    if _looks_placeholder(cred.ALPHA_VANTAGE_API_KEY):
+        report(WARN, "data", "Alpha Vantage key not configured (placeholder default) — primary fundamentals source down, Finnhub fallback only")
+    elif cred.ALPHA_VANTAGE_API_KEY:
         try:
             import requests
             r = requests.get("https://www.alphavantage.co/query",
