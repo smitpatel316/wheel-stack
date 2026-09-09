@@ -420,7 +420,13 @@ def main():
                     logger.warning("[SWALLOWED] equity history load failed, restarting history from empty: %r", e)
                     hist = []
             hist.append({"t": _dt.now().astimezone().isoformat(), "equity": float(acct.equity)})
-            eq_path.write_text(_json.dumps(hist[-5000:]))
+            # Guard: a $0 snapshot is never real for a funded account (2026-09-08:
+            # an RH-mode run recorded equity 0.0 and it collapsed the wheel-vs-SPY
+            # graph to zero for that day). Refuse to persist it.
+            if float(acct.equity) <= 0:
+                logger.warning("[EQUITY] refusing to record non-positive equity snapshot (would poison benchmark history)")
+            else:
+                eq_path.write_text(_json.dumps(hist[-5000:]))
 
             # SGOV holding snapshot (accrual-accurate income tracking for the dashboard)
             if SGOV_ENABLED:
