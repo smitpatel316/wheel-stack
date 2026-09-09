@@ -359,9 +359,11 @@ def main():
         logger.warning(f"Context analyzer failed, using defaults: {e}")
 
     effective_max_risk = adapted.get("MAX_RISK", MAX_RISK)
-    # Ladder phase caps are real ceilings: the dynamic base (account liquidity)
-    # must never exceed the env MAX_RISK for the current phase.
-    if effective_max_risk > MAX_RISK:
+    # Ladder phase caps are real ceilings for LIVE trading: the dynamic base
+    # (account liquidity) must never exceed the env MAX_RISK for the current
+    # phase. Paper keeps the v2.7 dynamic cap (MAX_RISK is only its fallback).
+    _is_live = (_broker_name == "robinhood") or (not IS_PAPER)
+    if _is_live and effective_max_risk > MAX_RISK:
         logger.warning(f"[RISK] Dynamic base ${effective_max_risk:,} exceeds env MAX_RISK ${MAX_RISK:,} — "
                        "capping at env MAX_RISK (Ladder phase ceiling)")
         effective_max_risk = MAX_RISK
