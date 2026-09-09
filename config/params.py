@@ -184,7 +184,16 @@ def _env_bool(name, current):
     v = _os.getenv(name)
     if v is None or v == "":
         return current
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    norm = v.strip().lower()
+    if norm in ("1", "true", "yes", "on"):
+        return True
+    if norm in ("0", "false", "no", "off"):
+        return False
+    # 2026-09-09 (P4 audit): an unrecognized value used to silently become
+    # False -- a typo like FUNDAMENTALS_ENABLED=treu would silently disable
+    # a safety screen. Keep the current value and warn, like _env_float.
+    _logger.warning("[SWALLOWED] env %s=%r is not a recognized boolean, keeping %r", name, v, current)
+    return current
 
 
 def _env_float(name, current):
