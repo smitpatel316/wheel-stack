@@ -66,6 +66,33 @@ def _append_history_atomic(path, entry, max_entries=5000):
     os.replace(tmp, path)
 
 
+def _live_max_risk_guard(is_paper):
+    """Refuse live Alpaca runs without an explicit, valid MAX_RISK.
+
+    2026-09-09 (P4 audit): the old tripwire only refused MAX_RISK >= 100000,
+    but the default is 90000 -- and config.params._env_float silently
+    restores that default for missing/invalid input. So IS_PAPER=false with
+    a missing or typo'd MAX_RISK sailed through "live" with the paper-scale
+    cap. A live run must name its cap explicitly; the >= 100000
+    paper-params refusal is retained as a second layer.
+    """
+    if is_paper:
+        return
+    raw = os.getenv("MAX_RISK", "").strip()
+    try:
+        value = float(raw) if raw else None
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value <= 0:
+        raise SystemExit(
+            "[SAFETY] IS_PAPER=false requires an explicit, valid MAX_RISK env value "
+            f"(got {raw!r}) -- refusing to run live on the paper default. "
+            "Set phase-appropriate MAX_RISK (e.g. 1000 for Ladder Phase 1).")
+    if value >= 100000:
+        raise SystemExit("[SAFETY] IS_PAPER=false with MAX_RISK>=100000 — "
+                         "paper params on a live account? Refusing to run. "
+                         "Set phase-appropriate MAX_RISK (e.g. 1000 for Ladder Phase 1).")
+
 def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=None):
     """SGOV float sync (v2.8, 2026-08-28 per Smit).
 
@@ -132,12 +159,9 @@ def main():
         logger.warning("[BROKER] Robinhood LIVE order path active (real money). "
                        "Market data: Alpaca paper feed. SGOV forced off.")
     elif _broker_name == "alpaca":
-        # Live+paper tripwire: IS_PAPER=false with paper-scale MAX_RISK is
-        # almost certainly a misconfigured live host. Refuse to run.
-        if not IS_PAPER and MAX_RISK >= 100000:
-            raise SystemExit("[SAFETY] IS_PAPER=false with MAX_RISK>=100000 — "
-                             "paper params on a live account? Refusing to run. "
-                             "Set phase-appropriate MAX_RISK (e.g. 1000 for Ladder Phase 1).")
+        # Live+paper tripwire: a live run must name an explicit, valid
+        # MAX_RISK -- the paper default must never silently carry a live run.
+        _live_max_risk_guard(IS_PAPER)
         client = BrokerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY, paper=IS_PAPER)
     else:
         raise SystemExit(f"[SAFETY] Unknown BROKER={_broker_name!r} (expected 'alpaca' or 'robinhood')")
