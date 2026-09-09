@@ -236,12 +236,14 @@ class RobinhoodBrokerClient:
 
     # ---------------------------------------------------------- positions
     def get_positions(self):
+        # Fail closed: every position must be fully parseable. A dropped or
+        # zero-qty position understates risk in calculate_risk(), so the
+        # engine would sell more puts than the cap allows. On the live-money
+        # path an unreadable position aborts the run instead of vanishing.
         out = []
         for p in _rh_option_positions():
-            occ = self._position_occ(p)
-            if not occ:
-                continue
-            qty = self._qty(p)
+            occ = self._position_occ(p)  # raises: never silently drop
+            qty = self._qty(p)  # raises: never silently zero
             out.append(SimpleNamespace(
                 symbol=occ,
                 qty=qty,
@@ -270,7 +272,11 @@ class RobinhoodBrokerClient:
                     raw=p,
                 ))
         except Exception as e:
-            logger.debug("[SWALLOWED] RH equity positions fetch failed: %r", e)
+            # Equity positions feed risk sizing too (long shares for CCs and
+            # total exposure). Trading without them is trading blind: fail
+            # closed instead of quietly understating risk.
+            raise RHOrderError(
+                f"RH equity positions unreadable, refusing to trade blind: {e}") from e
         return out
 
     @staticmethod
@@ -288,14 +294,16 @@ class RobinhoodBrokerClient:
     @staticmethod
     def _qty(p: dict) -> int:
         for k in ("quantity", "qty"):
-            try:
-                v = p.get(k)
-                if v is not None:
-                    return int(float(v))
-            except (TypeError, ValueError):
-                logger.debug("[SWALLOWED] non-numeric qty field %r=%r", k, p.get(k))
+            v = p.get(k)
+            if v is None:
                 continue
-        return 0
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                raise RHOrderError(
+                    f"RH position qty not parseable: {k}={v!r} (keys: {json_keys(p)})")
+        raise RHOrderError(
+            f"RH position has no parseable qty (keys: {json_keys(p)})")
 
     def _position_occ(self, p: dict) -> str | None:
         # Prefer a native OCC symbol if the API returns one.
@@ -313,8 +321,8 @@ class RobinhoodBrokerClient:
                 return _to_occ(str(und), str(exp)[:10], float(strike), str(otype))
         except (TypeError, ValueError):
             logger.debug("[SWALLOWED] bad OCC components und=%r exp=%r strike=%r", und, exp, strike)
-        logger.warning(f"[RH] could not build OCC for position: {json_keys(p)}")
-        return None
+        raise RHOrderError(
+            f"RH option position not parseable, refusing to drop it: {json_keys(p)}")
 
     # ---------------------------------------------------------- data (delegated)
     def get_options_contracts(self, underlying_symbols, contract_type=None):
