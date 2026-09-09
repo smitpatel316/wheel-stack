@@ -545,7 +545,13 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
 
         try:
             from core.optionable_sync import push_trade_to_optionable
-            push_trade_to_optionable(target.symbol, target.bid_price, contracts=abs(candidate.qty), delta=target.delta)
+            # Dashboard entry price must be the ACTUAL open fill when the poll
+            # above confirmed it - pushing the scan-time bid estimate
+            # mismatches the broker fill on the dashboard (2026-09-08: bid
+            # estimate $1.56 vs real $3.80 fill). Matches the pattern already
+            # used in core/execution.py (fill price, else estimate).
+            open_px = open_fill_px if open_fill_px is not None else target.bid_price
+            push_trade_to_optionable(target.symbol, open_px, contracts=abs(candidate.qty), delta=target.delta)
             # Also sync closed trade with real close price
             from core.optionable_sync import sync_closed_trades, get_close_price_from_activities
             real_close_price = get_close_price_from_activities(client, candidate.symbol)
