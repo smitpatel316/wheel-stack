@@ -23,6 +23,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 import http.server
@@ -31,6 +32,24 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 log = logging.getLogger(__name__)
+
+_OAUTH_CALLBACK_PATH = "/oauth/robinhood/callback"
+
+
+def _redact_oauth_query(text):
+    """Strip the OAuth callback query string (code/state) from log text.
+
+    2026-09-09 (P4 audit): the request line
+    GET /oauth/robinhood/callback?code=...&state=... was logged verbatim,
+    writing one-time authorization credentials into the log stream. The
+    path itself is kept (it is useful for routing debug); only the query
+    is redacted. Other paths are untouched.
+    """
+    return re.sub(
+        r"(" + re.escape(_OAUTH_CALLBACK_PATH) + r")\?\S*",
+        r"\1?***",
+        text,
+    )
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -154,7 +173,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     body = he.read()
                     code = he.code
             except Exception as e:
-                log.error("[RH-RELAY] relay to %s failed: %r", target, e)
+                # Never log the relay target or raw exception: both carry
+                # the OAuth code/state query string.
+                log.error("[RH-RELAY] relay to %s failed: %s",
+                          _redact_oauth_query(target),
+                          _redact_oauth_query(f"{type(e).__name__}: {e}"))
                 self._html(502, "Relay failed",
                            "Could not reach the Hatch callback sink. Try again.")
                 return
@@ -239,6 +262,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         line = "%s - %s" % (self.address_string(), fmt % args)
+        line = _redact_oauth_query(line)  # never log OAuth code/state
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}", flush=True)
 
 
