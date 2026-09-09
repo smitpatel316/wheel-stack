@@ -38,6 +38,33 @@ OPTIONABLE_URL = os.getenv("OPTIONABLE_URL", "http://localhost:8096")
 TIMEOUT = 8
 TREASURY_SYMBOLS = {"SGOV", "USFR", "BIL", "SHV", "TFLO"}
 
+def _require_alpaca_client(client) -> bool:
+    """Account/mode guard for every Alpaca-account sync in this module.
+
+    2026-09-08 incident: a BROKER=robinhood review-only run passed the (empty)
+    Robinhood individual-account client into sync_closed_trades(), which read
+    "positions I see" as "positions that exist" and FALSE-CLOSED all 10 real
+    Alpaca paper CSPs in the Optionable dashboard with estimated prices.
+
+    These syncs describe the Alpaca paper account ONLY. Refuse - loudly - to
+    run them in a Robinhood-mode run or against a non-Alpaca client, whatever
+    the caller. Duck-typed test fakes and the real BrokerClient pass; anything
+    that smells like the Robinhood adapter does not.
+    """
+    if os.getenv("BROKER", "alpaca").lower() == "robinhood":
+        logger.warning(
+            "[SYNC] refusing Alpaca-account sync: BROKER=robinhood - the dashboard "
+            "tracks the Alpaca paper account, not the Robinhood account")
+        return False
+    cls = type(client)
+    name = f"{getattr(cls, '__module__', '')}.{getattr(cls, '__name__', '')}".lower()
+    if "robinhood" in name:
+        logger.warning(
+            "[SYNC] refusing Alpaca-account sync for non-Alpaca client %s - "
+            "close-on-absence would corrupt the tracker", name)
+        return False
+    return True
+
 def alive() -> bool:
     try:
         r = requests.get(f"{OPTIONABLE_URL}/api/health", timeout=TIMEOUT)
@@ -308,6 +335,8 @@ def push_trade_to_optionable(
 
 def sync_alpaca_equity_to_optionable(client):
     """Sync equity longs (excluding treasuries) as manual stocks - idempotent"""
+    if not _require_alpaca_client(client):
+        return
     if not alive():
         return
     try:
@@ -404,6 +433,8 @@ def _delete_optionable_sgov_entries(account_id):
 
 def sync_sgov_to_optionable(client):
     """SGOV idle cash -> track as stock"""
+    if not _require_alpaca_client(client):
+        return
     if not alive():
         return
     try:
@@ -510,6 +541,8 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
     - Else if closed early, fetch real buy price; profit = entry - close.
     - If stock position appeared for same ticker and CSP, mark Assigned.
     """
+    if not _require_alpaca_client(client):
+        return
     if not alive():
         return
     try:
@@ -728,6 +761,8 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
     Returns dict with summary for logging: {realized, optionable_pnl, discrepancy, corrected_count}
     """
     summary = {"realized": 0.0, "fees": 0.0, "optionable_pnl": 0.0, "discrepancy": 0.0, "corrected": 0, "entries": []}
+    if not _require_alpaca_client(client):
+        return summary
     if not alive():
         logger.debug("Optionable not alive, skip realized P/L sync")
         return summary
@@ -899,6 +934,8 @@ def reconcile_open_entry_prices(client) -> int:
     skips rows within $0.005, never touches rows without an OCC: syncId note,
     no-ops when the tracker is down. Returns rows patched.
     """
+    if not _require_alpaca_client(client):
+        return 0
     if not alive():
         return 0
     patched = 0
