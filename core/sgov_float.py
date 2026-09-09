@@ -39,6 +39,18 @@ from config.params import (SGOV_CASH_BUFFER, SGOV_REBALANCE_BAND, SGOV_STOCK_BP_
 logger = logging.getLogger(__name__)
 
 
+class SGOVStateUnreadable(Exception):
+    """The SGOV sweep cannot read broker state its guards depend on.
+
+    Raised (never swallowed) when the open-order list or the current SGOV
+    position quantity is unreadable/unparseable. Assuming zero in those
+    cases is fail-open on the money path: zero pending orders blinds the
+    duplicate-buy guard (a second buy can stack on an in-flight one) and
+    zero holdings can over-buy. The sweep aborts instead -- the run does
+    not place SGOV orders blind.
+    """
+
+
 def compute_float_target(equity: float, risk_cap: float) -> float:
     """Structural float above the deployable risk cap, floored at 0."""
     return max(0.0, float(equity) - float(risk_cap))
@@ -112,7 +124,13 @@ def decide_float_order(target_mv: float, held_qty: int, price: float,
 def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
                     enabled=None, band=SGOV_REBALANCE_BAND,
                     order_fn=None):
-    """Reconcile SGOV holdings with the float target. Never raises.
+    """Reconcile SGOV holdings with the float target.
+
+    Raises SGOVStateUnreadable (fail closed) when the broker state the sweep
+    depends on is unreadable: the open-order list (the duplicate-buy guard
+    would be blind) or the SGOV position quantity (a zero-holding assumption
+    would over-buy). The sweep aborts and places no order. Other unexpected
+    errors are still contained and logged as before.
 
     `risk_cap` must be the run's EFFECTIVE cap (v2.7 dynamic base after
     adapt_params regime scaling). When omitted (tests/standalone) it falls
@@ -143,11 +161,20 @@ def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
         sgov_price = 100.72
         for p in positions:
             if getattr(p, 'symbol', '') == 'SGOV':
+                # Fail closed on the quantity: an unparseable qty must never
+                # read as zero holdings (the sweep would over-buy).
+                raw_qty = getattr(p, 'qty', 0)
                 try:
-                    sgov_qty = int(float(getattr(p, 'qty', 0)))
+                    sgov_qty = int(float(raw_qty))
+                except Exception as e:
+                    raise SGOVStateUnreadable(
+                        f"SGOV position qty {raw_qty!r} not parseable - "
+                        f"refusing to assume zero holdings: {e}") from e
+                try:
                     sgov_price = float(getattr(p, 'current_price', sgov_price) or sgov_price)
                 except Exception as e:
-                    log.debug("[SWALLOWED] SGOV position field parse failed, keeping qty/price defaults: %r", e)
+                    log.debug("[SGOV FLOAT] SGOV position price unparseable, "
+                              "keeping last price: %r", e)
         try:
             latest = client.get_stock_latest_trade("SGOV")
             trade = latest.get("SGOV") if isinstance(latest, dict) else None
@@ -181,6 +208,10 @@ def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
             log.debug(f"[SGOV FLOAT] funding-queue check failed: {_qe}")
 
         # Pending broker orders (belt under the ledger suspenders).
+        # Fail closed: an unreadable order list must never read as zero
+        # pending orders -- the duplicate-buy guard in decide_float_order
+        # would be blind and the sweep could stack a second buy on an
+        # in-flight one.
         pending_buy_qty = 0
         pending_sell_qty = prefund_pending_qty
         try:
@@ -195,7 +226,9 @@ def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
                                     if getattr(o, 'symbol', '') == 'SGOV'
                                     and 'sell' in str(getattr(o, 'side', '')).lower())
         except Exception as e:
-            log.debug(f"Open order check failed: {e}")
+            raise SGOVStateUnreadable(
+                "SGOV open-order list unreadable - refusing to assume zero "
+                f"pending orders: {e}") from e
 
         # stock-BP buffer constrains PURCHASES only; and while a queue is
         # pending, buys may eat only BP the queue doesn't need.
@@ -224,5 +257,9 @@ def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
             order_fn(client, "buy", qty, logger_obj=log)
         elif action == "sell":
             order_fn(client, "sell", qty, logger_obj=log)
+    except SGOVStateUnreadable:
+        # Fail-closed aborts propagate: the sweep must not place orders
+        # blind, and the run must not continue as if the sweep succeeded.
+        raise
     except Exception as e:
         log.warning(f"SGOV float sync failed: {e}")
