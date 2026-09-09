@@ -17,8 +17,54 @@ from models.contract import Contract
 import os
 import sys
 import json
+import logging
+from datetime import datetime, timezone
 
 TOTAL_CAPITAL = 100_000
+
+_hist_log = logging.getLogger(__name__)
+
+
+def _load_history_list(path):
+    """Load a JSON history list from *path*.
+
+    2026-09-09 (P3 audit): unreadable content is preserved as
+    ``<name>.corrupt-<UTC-ts>`` and surfaced at ERROR. The old code logged
+    a warning and restarted from an empty list, so a single truncated
+    write wiped the entire equity/benchmark history on the next run
+    (the 2026-09-09 strategy_log.json incident class).
+    """
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, list) else [data]
+    except Exception as e:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        corrupt_backup = path.with_name(path.name + f".corrupt-{ts}UTC")
+        try:
+            path.replace(corrupt_backup)
+        except Exception as be:
+            _hist_log.error("[SWALLOWED] history backup of corrupt %s failed: %r", path, be)
+        _hist_log.error("[SWALLOWED] history file %s unreadable (%r) - moved to %s, starting fresh list",
+                        path, e, corrupt_backup)
+        return []
+
+
+def _append_history_atomic(path, entry, max_entries=5000):
+    """Append *entry* to the JSON history list at *path*, atomically.
+
+    The payload is fully serialized with ``default=str`` BEFORE any file is
+    opened, then written to ``<name>.tmp`` and ``os.replace``d into place:
+    a crash or a non-serializable value mid-dump can never leave a
+    truncated history file behind.
+    """
+    hist = _load_history_list(path)
+    hist.append(entry)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(hist[-max_entries:], default=str))
+    os.replace(tmp, path)
+
 
 def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=None):
     """SGOV float sync (v2.8, 2026-08-28 per Smit).
@@ -409,24 +455,17 @@ def main():
 
         # Record equity snapshot for the Optionable income/benchmark dashboard
         try:
-            import json as _json
-            from datetime import datetime as _dt
             eq_path = Path(__file__).resolve().parent.parent / "logs" / "equity_history.json"
-            hist = []
-            if eq_path.exists():
-                try:
-                    hist = _json.loads(eq_path.read_text())
-                except Exception as e:
-                    logger.warning("[SWALLOWED] equity history load failed, restarting history from empty: %r", e)
-                    hist = []
-            hist.append({"t": _dt.now().astimezone().isoformat(), "equity": float(acct.equity)})
             # Guard: a $0 snapshot is never real for a funded account (2026-09-08:
             # an RH-mode run recorded equity 0.0 and it collapsed the wheel-vs-SPY
             # graph to zero for that day). Refuse to persist it.
             if float(acct.equity) <= 0:
                 logger.warning("[EQUITY] refusing to record non-positive equity snapshot (would poison benchmark history)")
             else:
-                eq_path.write_text(_json.dumps(hist[-5000:]))
+                _append_history_atomic(eq_path, {
+                    "t": datetime.now().astimezone().isoformat(),
+                    "equity": float(acct.equity),
+                })
 
             # SGOV holding snapshot (accrual-accurate income tracking for the dashboard)
             if SGOV_ENABLED:
@@ -441,15 +480,11 @@ def main():
                                 logger.debug("[SWALLOWED] SGOV avg_entry_price parse failed, using None: %r", e)
                                 sgov_avg = None
                     sg_path = Path(__file__).resolve().parent.parent / "logs" / "sgov_history.json"
-                    sh = []
-                    if sg_path.exists():
-                        try:
-                            sh = _json.loads(sg_path.read_text())
-                        except Exception as e:
-                            logger.warning("[SWALLOWED] SGOV history load failed, restarting history from empty: %r", e)
-                            sh = []
-                    sh.append({"t": _dt.now().astimezone().isoformat(), "shares": sgov_qty, "avg": sgov_avg})
-                    sg_path.write_text(_json.dumps(sh[-5000:]))
+                    _append_history_atomic(sg_path, {
+                        "t": datetime.now().astimezone().isoformat(),
+                        "shares": sgov_qty,
+                        "avg": sgov_avg,
+                    })
                 except Exception as _e2:
                     logger.warning(f"[ACCOUNT] sgov snapshot failed: {_e2}")
         except Exception as _e:
