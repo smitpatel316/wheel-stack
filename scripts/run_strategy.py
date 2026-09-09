@@ -785,7 +785,9 @@ def main():
     try:
         strat_logger.save()
     except Exception as e:
-        logger.debug(f"Strategy logger save failed: {e}")
+        # 2026-09-09: was debug - a persistence failure must be visible, it can
+        # mean today's run entry never reached the audit log.
+        logger.warning(f"Strategy logger save failed: {e}")
 
     # Push the account snapshot + scan funnel to the Optionable dashboard.
     try:

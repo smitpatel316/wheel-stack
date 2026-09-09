@@ -23,11 +23,12 @@ Logs to:
 - logs/market_context.json (from context_analyzer)
 """
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from core.utils import get_ny_timestamp
 import json
 import logging
 import math
+import os
 
 log = logging.getLogger(__name__)
 
@@ -476,7 +477,20 @@ class StrategyLogger:
                     if not isinstance(data, list):
                         raise ValueError("Log file does not contain a list.")
                 except json.JSONDecodeError as e:
-                    log.warning("[SWALLOWED] strategy log file %s unreadable JSON, starting fresh list: %r", self.log_file, e)
+                    # 2026-09-09: never silently discard history again. A corrupt
+                    # file means a previous write died mid-dump; preserve the bytes
+                    # for forensics and start fresh LOUDLY.
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    corrupt_backup = self.log_file.with_name(
+                        self.log_file.name + f".corrupt-{ts}UTC")
+                    try:
+                        self.log_file.replace(corrupt_backup)
+                    except Exception as be:
+                        log.error("[SWALLOWED] strategy log backup of corrupt %s failed: %r",
+                                  self.log_file, be)
+                    log.error("[SWALLOWED] strategy log file %s unreadable JSON (%r) - "
+                              "moved to %s, starting fresh list",
+                              self.log_file, e, corrupt_backup)
                     data = []
         else:
             data = []
@@ -488,6 +502,12 @@ class StrategyLogger:
         if len(data) > 1000:
             data = data[-1000:]
 
-        # Write the updated list back
-        with open(self.log_file, "w") as f:
-            json.dump(data, f, indent=2)
+        # Write the updated list back ATOMICALLY (temp + replace): a crash or a
+        # serialization error mid-dump must never leave a truncated file behind.
+        # default=str mirrors the JSONL path - e.g. Alpaca order UUIDs in
+        # execution.order_id stringify instead of killing the dump (2026-09-09:
+        # two runs truncated the log exactly at an order_id UUID).
+        tmp = self.log_file.with_name(self.log_file.name + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, self.log_file)

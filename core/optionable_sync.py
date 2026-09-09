@@ -384,6 +384,24 @@ def sync_alpaca_equity_to_optionable(client):
     except Exception as e:
         logger.warning(f"sync_alpaca_equity_to_optionable failed: {e}")
 
+def _delete_optionable_sgov_entries(account_id):
+    """Remove all SGOV stock entries from Optionable (broker holds none)."""
+    try:
+        r = requests.get(f"{OPTIONABLE_URL}/api/stocks?accountId={account_id}", timeout=TIMEOUT)
+        if r.status_code != 200:
+            return
+        for s in (r.json().get('data') or []):
+            if s.get('ticker') == 'SGOV':
+                try:
+                    requests.delete(f"{OPTIONABLE_URL}/api/stocks/{s['id']}", timeout=TIMEOUT)
+                    logger.info(f"Optionable: removed stale SGOV entry (id {s['id']}) - broker holds 0")
+                except Exception as e:
+                    logger.warning("[SWALLOWED] delete of stale SGOV stock entry (id %s): %r", s.get('id'), e)
+                    pass
+    except Exception as e:
+        logger.warning("[SWALLOWED] fetch of existing SGOV stock entries from Optionable: %r", e)
+        pass
+
 def sync_sgov_to_optionable(client):
     """SGOV idle cash -> track as stock"""
     if not alive():
@@ -422,6 +440,10 @@ def sync_sgov_to_optionable(client):
                 logger.warning("[SWALLOWED] fetch of open SGOV orders from Alpaca: %r", e)
                 pass
             if sgov_qty <= 0:
+                # 2026-09-09: broker holds no SGOV and none pending - delete any
+                # stale dashboard entries instead of leaving phantoms behind
+                # (the 112-share buy/sell round-trip left one on the board).
+                _delete_optionable_sgov_entries(account_id)
                 return
 
         # Fetch current SGOV stock entries

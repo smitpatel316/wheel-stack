@@ -512,10 +512,21 @@ def save_context_log(ctx: MarketContext, path: str = "logs/market_context.json")
             if not isinstance(data, list):
                 data = [data]
         except Exception as e:
-            logger.warning("[SWALLOWED] market context log %s unreadable, starting fresh list: %r", p, e)
+            # 2026-09-09: same rule as strategy_logger - never silently discard
+            # history; preserve the corrupt bytes and start fresh loudly.
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+            corrupt_backup = p.with_name(p.name + f".corrupt-{ts}UTC")
+            try:
+                p.replace(corrupt_backup)
+            except Exception as be:
+                logger.error("[SWALLOWED] market context log backup of corrupt %s failed: %r", p, be)
+            logger.error("[SWALLOWED] market context log %s unreadable (%r) - moved to %s, starting fresh list",
+                         p, e, corrupt_backup)
             data = []
     else:
         data = []
     data.append(entry)
     data = data[-500:]
-    p.write_text(json.dumps(data, indent=2))
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str))
+    tmp.replace(p)
