@@ -49,9 +49,18 @@ def test_bool_parsing_variants(fresh_params):
     for truthy in ("1", "true", "TRUE", "yes", "on"):
         fresh_params.setenv("SGOV_ENABLED", truthy)
         assert importlib.reload(params).SGOV_ENABLED is True
-    for falsy in ("0", "false", "no", "off", "nonsense"):
+    for falsy in ("0", "false", "no", "off"):
         fresh_params.setenv("SGOV_ENABLED", falsy)
         assert importlib.reload(params).SGOV_ENABLED is False
+
+
+def test_invalid_bool_keeps_default(fresh_params):
+    # 2026-09-09 (P4 audit): an unrecognized value (e.g. a typo like
+    # FUNDAMENTALS_ENABLED=treu) must keep the default and warn -- it used
+    # to silently become False, which could disable a safety screen.
+    fresh_params.setenv("SGOV_ENABLED", "nonsense")
+    assert importlib.reload(params).SGOV_ENABLED is True  # file default
+    assert params._env_bool("FUNDAMENTALS_ENABLED", False) is False
 
 
 def test_invalid_number_keeps_default(fresh_params):
