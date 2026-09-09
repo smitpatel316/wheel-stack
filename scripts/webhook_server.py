@@ -199,11 +199,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/webhooks/finnhub-earnings":
             self._json(404, {"error": "not found"})
             return
-        # Match the Pi's original behavior: posts without a secret header are
-        # accepted (the documented usage in config/webhook_config.json sends
-        # none), but a wrong secret is still rejected.
+        # The secret is mandatory. config/webhook_config.json documents that
+        # this receiver validates X-Finnhub-Secret, and an unauthenticated
+        # POST otherwise appends to the event log, bumps invalidation state,
+        # and deletes the earnings cache (2026-09-09 audit: missing-secret
+        # posts were accepted). Reject missing and wrong secrets alike.
         sent = self.headers.get("X-Finnhub-Secret")
-        if sent is not None and sent != SECRET:
+        if not sent or not hmac.compare_digest(sent, SECRET):
             self._json(401, {"error": "invalid secret"})
             return
         try:
