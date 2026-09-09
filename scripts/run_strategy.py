@@ -82,6 +82,9 @@ def _live_max_risk_guard(is_paper):
     try:
         value = float(raw) if raw else None
     except (TypeError, ValueError):
+        # Not silent: an unparseable MAX_RISK becomes "missing" and the live
+        # run refuses below (fail closed).
+        _hist_log.debug("[SWALLOWED] MAX_RISK=%r not parseable, treating as missing", raw)
         value = None
     if value is None or value <= 0:
         raise SystemExit(
@@ -92,6 +95,34 @@ def _live_max_risk_guard(is_paper):
         raise SystemExit("[SAFETY] IS_PAPER=false with MAX_RISK>=100000 — "
                          "paper params on a live account? Refusing to run. "
                          "Set phase-appropriate MAX_RISK (e.g. 1000 for Ladder Phase 1).")
+
+
+def _margin_debit_guard(acct):
+    """Hard constraint: never carry a margin debit. Fail closed.
+
+    Raises SystemExit(2) when the account shows negative cash (a margin
+    debit) or when the account could not be read at all (``None``) — the
+    run must abort before any order path rather than trade blind. Returns
+    the cash balance otherwise.
+
+    2026-09-09: the old inline version assigned ``_acct`` inside a ``try``
+    and read it in a second ``try``; when ``get_account()`` raised, the
+    second block hit ``NameError``, the ``except Exception`` swallowed it
+    at debug level, and the run traded with no margin check at all.
+    """
+    if acct is None:
+        print("[SAFETY] Account state unreadable (get_account failed) — "
+              "refusing to trade blind. Resolve before the next run.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    cash = float(getattr(acct, 'cash', 0) or 0)
+    if cash < 0:
+        print(f"[SAFETY] Account cash ${cash:,.2f} < 0 (margin debit) — "
+              "refusing to trade. Resolve the debit before the next run.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return cash
+
 
 def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=None):
     """SGOV float sync (v2.8, 2026-08-28 per Smit).
@@ -381,6 +412,10 @@ def main():
         # margin = settled cash + treasury ETF (SGOV) value - cash buffer.
         # Grows/shrinks with the account so gains compound back into the wheel.
         dynamic_base = None
+        # 2026-09-09: fail-closed init. If get_account() raises below, _acct
+        # must stay None (not undefined) so the margin guard aborts instead
+        # of trading blind on a swallowed NameError.
+        _acct = None
         try:
             from core.state_manager import TREASURY_SYMBOLS
             _acct = client.get_account()
@@ -394,16 +429,10 @@ def main():
 
         # Hard constraint: never carry a margin debit. Fail closed — abort the
         # run before any order path rather than trading through it.
-        try:
-            _cash_check = float(getattr(_acct, 'cash', 0) or 0)
-            if _cash_check < 0:
-                logger.critical(f"[SAFETY] Account cash ${_cash_check:,.2f} < 0 (margin debit) — "
-                                "refusing to trade. Resolve the debit before the next run.")
-                raise SystemExit(2)
-        except SystemExit:
-            raise
-        except Exception as e:
-            logger.debug(f"[SWALLOWED] margin-debit pre-check failed: {e!r}")
+        # 2026-09-09: _acct is None when get_account() failed above; an
+        # unreadable account aborts the run (trading blind is not an
+        # option), it never degrades to a logged-and-continued skip.
+        _margin_debit_guard(_acct)
         adapted = adapt_params(market_ctx, {"MAX_RISK": dynamic_base} if dynamic_base else None)
         strat_logger.set_market_context(market_ctx)
         if market_ctx and earnings_map:

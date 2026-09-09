@@ -32,7 +32,7 @@ environment or `.env` — no source edits, ever, for a deployment:
 | `MIN_PREMIUM` | 0.20 | min option premium per contract |
 | `SCORE_MIN` | 0.02 | min candidate score |
 | `WATCHLIST` | `config/symbol_list.txt` | comma-separated tickers, replaces the file |
-| `SGOV_ENABLED` | false | Alpaca-paper cash sweep; OFF for any real broker |
+| `SGOV_ENABLED` | true | Alpaca-paper cash sweep (v2.8 float model, on since 2026-08-28); OFF for any real broker |
 | `IS_PAPER` | true | paper vs live Alpaca account |
 | `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | — | broker credentials (env only, never in git) |
 | `FINNHUB_API_KEY` / `ALPHA_VANTAGE_API_KEY` | — | fundamentals data (each is the other's fallback) |
