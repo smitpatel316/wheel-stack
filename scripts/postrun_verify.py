@@ -39,6 +39,10 @@ ACTION_KEEP = re.compile(
     r"(?:"
     r"\[ROLLER\] Rolling [A-Z0-9]{6,22} ->"      # executed roll
     r"|\[ROLL\] (?:Opening|Closing|Open order|Close order)"  # roll legs + fills
+    r"|\[CLOSER\] Close order .* submitted for"  # executed buy-to-close (core/closer.py);
+    # 2026-09-09 P4: the old "\border submitted\b" never matched this line
+    # (the order id sits between "order" and "submitted"), so runs that
+    # closed positions reported "ACTIONS: none".
     r"|\border submitted\b"
     r"|\borderstatus\.filled\b"
     r"|\bFILLED\b"
