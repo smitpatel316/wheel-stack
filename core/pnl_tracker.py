@@ -319,13 +319,17 @@ def get_pnl_summary_for_logging(client) -> Dict:
 def reconcile_optionable_vs_alpaca(client, optionable_url=None):
     try:
         summary = get_pnl_summary_for_logging(client)
+        # NOTE: get_pnl_summary_for_logging() returns the flattened
+        # real_pnl_* / optionable_pnl / pnl_discrepancy keys - reading the
+        # unflattened 'realized'/'unrealized'/'optionable'/'discrepancy' keys
+        # (as this wrapper did before 2026-09-09) silently reports zeros.
         return {
             'alpaca': {
-                'realized_matched': summary.get('realized', 0),
-                'unrealized': summary.get('unrealized', 0),
+                'realized_matched': summary.get('real_pnl_realized', 0),
+                'unrealized': summary.get('real_pnl_unrealized', 0),
             },
-            'optionable': summary.get('optionable', {}),
-            'discrepancy': {'inflated_vs_real': summary.get('discrepancy', 0)},
+            'optionable': summary.get('optionable_pnl', {}),
+            'discrepancy': {'inflated_vs_real': summary.get('pnl_discrepancy', 0)},
             'summary': summary,
         }
     except Exception as e:
