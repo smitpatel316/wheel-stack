@@ -118,6 +118,12 @@ class _RHTradeClientShim:
 
 
 class RobinhoodBrokerClient:
+    # Identity hook for engine code that must behave differently per broker
+    # (duck-typed via getattr so the Alpaca path needs no import). Paper-only
+    # machinery — the Optionable new-trade push, the T+1 FundingQueue — keys
+    # off this to stay away from the RH account.
+    broker_name = "robinhood"
+
     def __init__(self, data_client=None, live: bool = False, dry_run: bool = False):
         if not live or os.getenv("RH_LIVE_ORDERS", "false").lower() not in ("1", "true", "yes"):
             raise RHOrderError(
@@ -134,6 +140,11 @@ class RobinhoodBrokerClient:
     @property
     def trade_client(self):
         return self._trade_client
+
+    @property
+    def dry_run(self) -> bool:
+        """Public read of the RH_DRY_RUN gate: review-only, never places."""
+        return self._dry_run
 
     # ---------------------------------------------------------- internal
     def _option_id(self, occ_symbol: str) -> str:

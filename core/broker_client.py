@@ -21,6 +21,10 @@ class OptionHistoricalDataClientSigned(UserAgentMixin, OptionHistoricalDataClien
 
 
 class BrokerClient:
+    # Identity hook mirroring RobinhoodBrokerClient.broker_name so engine
+    # code can duck-type the broker without importing either adapter.
+    broker_name = "alpaca"
+
     def __init__(self, api_key, secret_key, paper=True):
         self.trade_client = TradingClientSigned(api_key=api_key, secret_key=secret_key, paper=paper)
         self.stock_client = StockHistoricalDataClientSigned(api_key=api_key, secret_key=secret_key)

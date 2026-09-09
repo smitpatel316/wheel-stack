@@ -10,6 +10,17 @@ logger = logging.getLogger(f"strategy.{__name__}")
 import math as _math
 from .funding_queue import FundingQueue
 
+def _broker_mode(client):
+    """(broker_name, dry_run) for the client, duck-typed.
+
+    RobinhoodBrokerClient declares broker_name="robinhood" and a dry_run
+    property; the Alpaca BrokerClient declares broker_name="alpaca".
+    Anything else (fakes, legacy) is treated as the Alpaca paper path.
+    """
+    return (getattr(client, "broker_name", "alpaca") or "alpaca",
+            bool(getattr(client, "dry_run", False)))
+
+
 def _prefund_queue_with_sgov(client, deficit, risk_bp, queue):
     """ONE SGOV market sale per run to pre-fund the next-day CSP queue.
 
@@ -112,6 +123,16 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
     mid = calc_mid_price(contract_obj)
     bid = float(getattr(contract_obj, 'bid_price', 0) or 0)
 
+    _dry = bool(getattr(client, "dry_run", False))
+    if _dry:
+        # RH_DRY_RUN validation: full decision path, zero order-path calls.
+        # Return before the limit/market branches so a dry run never sleeps
+        # polling for a fill that can never come, and never logs the scary
+        # "fill not confirmed" warning for a phantom order.
+        logger.warning(f"[DRY-RUN] would sell {symbol} @ mid ${mid:.2f} (bid ${bid:.2f}) - no order placed")
+        return {"type": "dry_run", "price": None, "mid": mid, "bid": bid,
+                "order_id": None, "improvement": 0.0}
+
     if not enable_limit or mid <= 0:
         try:
             return _market_sell_and_confirm(client, symbol, bid, mid, "market")
@@ -175,6 +196,12 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
     execution_config = execution_config or {}
     enable_limit = execution_config.get("limit_enabled", True)
     wait_seconds = execution_config.get("wait_seconds", 8)
+    # Broker isolation (2026-09-09): the FundingQueue and the Optionable
+    # new-trade push are PAPER-account machinery. The Robinhood adapter must
+    # never read/mutate them (2026-09-08: an RH dry-run validation corrupted
+    # Optionable with phantom trades), and a dry run must never push anything
+    # anywhere — it places no orders.
+    _broker_name, _dry_run = _broker_mode(client)
 
     logger.info("Searching for put options...")
     filtered_symbols = filter_underlying(client, allowed_symbols, buying_power, earnings_map=earnings_map, dividend_map=dividend_map, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map, is_call=False)
@@ -242,12 +269,17 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
         # cover THIS run are skipped and queued for next-day funding; one SGOV
         # sale per run pre-funds the queue. The queue is hints only — every
         # entry is re-validated fresh by the scan on later runs.
-        queue = FundingQueue().load()
-        queue.expire()
+        # Paper-only: the queue file is shared account state, and SGOV
+        # pre-funding exists only on the Alpaca path (SGOV is forced off for
+        # Robinhood). An RH run must neither read nor mutate it.
+        _use_queue = _broker_name != "robinhood"
+        queue = FundingQueue().load() if _use_queue else None
+        if queue is not None:
+            queue.expire()
         newly_queued = 0
         # Visibility: a queued entry that today's scan doesn't re-select is
         # otherwise silent all run (BAC 2026-08-21 sat pending with no log line).
-        if queue.entries:
+        if queue is not None and queue.entries:
             logger.info(f"[FUND QUEUE] pending: " + ", ".join(
                 f"{e.get('symbol')} ${float(e.get('need', 0)):.0f} (queued {str(e.get('queued_at', '?'))[:10]})"
                 for e in queue.entries))
@@ -258,6 +290,11 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                 logger.info(f"Skipping {p.symbol} strike ${p.strike} need ${need} > BP ${buying_power}")
                 continue
             if opt_bp is not None and opt_bp < need:
+                if queue is None:
+                    # Robinhood mode has no T+1 queue (SGOV is off there) — the
+                    # broker rejects what it can't cover, so skip loudly.
+                    logger.info(f"[FUND QUEUE] {p.symbol} strike ${p.strike} needs ${need:.0f} > options BP ${opt_bp:.0f} - skipped (no funding queue in Robinhood mode)")
+                    continue
                 # Never sell SGOV for a same-day fill (T+1 makes it pointless
                 # churn); queue the candidate so tomorrow's settled cash funds it.
                 # Cap total queued need at remaining risk headroom: without this
@@ -305,7 +342,8 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                     # Alpaca's BP disagreed with our local view (stale/None
                     # opt_bp) — queue the candidate for T+1 funding instead of
                     # dropping it silently (F 2026-08-21 vanished this way).
-                    if queue.pending_need_except(p.underlying) + need <= max(buying_power, 0):
+                    # Paper-only: the RH path has no queue to add to.
+                    if queue is not None and queue.pending_need_except(p.underlying) + need <= max(buying_power, 0):
                         score_val_q = 0
                         try:
                             score_val_q = scores[put_options.index(p)]
@@ -320,11 +358,21 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
                     break
                 continue
 
-            try:
-                push_trade_to_optionable(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1, delta=getattr(p, 'delta', None))
-            except Exception as e:
-                logger.warning(f"Optionable sync failed for {p.symbol}: {e}")
-            queue.mark_filled(p.symbol, underlying=getattr(p, 'underlying', None))
+            if _dry_run:
+                # A dry run places nothing: recording it in Optionable would
+                # create phantom open trades (2026-09-08 incident).
+                logger.info(f"[DRY-RUN] {p.symbol} validated - not pushed to Optionable (no real order)")
+            elif _broker_name == "robinhood":
+                # RH-native dashboard sync is future work (2026-09-08): never
+                # record an RH trade under the paper Optionable account.
+                logger.info(f"[SYNC] Robinhood mode: skipping Optionable push for {p.symbol}")
+            else:
+                try:
+                    push_trade_to_optionable(p.symbol, (exec_result.get("price") if exec_result else p.bid_price) or 0, contracts=1, delta=getattr(p, 'delta', None))
+                except Exception as e:
+                    logger.warning(f"Optionable sync failed for {p.symbol}: {e}")
+            if queue is not None:
+                queue.mark_filled(p.symbol, underlying=getattr(p, 'underlying', None))
 
             if strat_logger:
                 d = p.to_dict()
@@ -339,20 +387,23 @@ def sell_puts(client, allowed_symbols, buying_power, strat_logger=None, market_c
         # One SGOV sale per run to pre-fund the whole queue (T+1: proceeds
         # settle overnight, tomorrow's run funds queued candidates from
         # settled cash). Never when settled BP + earlier pre-funds cover it.
-        if fund_with_sgov and queue.entries:
-            deficit = queue.prefund_deficit(opt_bp)
-            if deficit > 0:
-                _prefund_queue_with_sgov(client, deficit, buying_power, queue)
-            else:
-                logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) already covered by settled BP/prefunded cash - no SGOV sale")
-        elif queue.entries:
-            logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) but SGOV funding disabled - no pre-fund sale")
-        if queue.dirty:
-            queue.save()
+        # Skipped entirely in Robinhood mode (queue is None there).
+        if queue is not None:
+            if fund_with_sgov and queue.entries:
+                deficit = queue.prefund_deficit(opt_bp)
+                if deficit > 0:
+                    _prefund_queue_with_sgov(client, deficit, buying_power, queue)
+                else:
+                    logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) already covered by settled BP/prefunded cash - no SGOV sale")
+            elif queue.entries:
+                logger.info(f"[FUND QUEUE] {len(queue.entries)} queued (${queue.pending_need():.0f}) but SGOV funding disabled - no pre-fund sale")
+            if queue.dirty:
+                queue.save()
     else:
         logger.info("No put options found with sufficient delta and open interest.")
 
 def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, market_context=None, dividend_map=None, execution_config=None):
+    _broker_name, _dry_run = _broker_mode(client)
     if stock_qty < 100:
         # Log and skip instead of raising: an unhandled raise here killed the
         # whole run (SGOV sweep + Optionable sync never happened).
@@ -409,7 +460,13 @@ def sell_calls(client, symbol, purchase_price, stock_qty, strat_logger=None, mar
             return
 
         try:
-            push_trade_to_optionable(contract.symbol, (exec_result.get("price") if exec_result else contract.bid_price) or 0, contracts=1, delta=getattr(contract, 'delta', None))
+            push_sym = contract.symbol
+            if _dry_run:
+                logger.info(f"[DRY-RUN] {push_sym} validated - not pushed to Optionable (no real order)")
+            elif _broker_name == "robinhood":
+                logger.info(f"[SYNC] Robinhood mode: skipping Optionable push for {push_sym}")
+            else:
+                push_trade_to_optionable(push_sym, (exec_result.get("price") if exec_result else contract.bid_price) or 0, contracts=1, delta=getattr(contract, 'delta', None))
         except Exception as e:
             logger.warning(f"Optionable sync failed for {contract.symbol}: {e}")
         if strat_logger:
