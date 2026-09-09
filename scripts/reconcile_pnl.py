@@ -58,9 +58,18 @@ def main():
         with open(log_path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
-        if args.alert and abs(drift_val) > args.threshold:
-            print(f"ALERT: P/L drift ${drift_val:.2f} > ${args.threshold}")
-            sys.exit(1)
+        if abs(drift_val) > args.threshold:
+            # 2026-09-09 (P4 audit): the old code printed "OK Drift $X within
+            # threshold" here whenever --alert was off -- the documented cron
+            # invocation -- even when the drift EXCEEDED the threshold, so the
+            # nightly log looked clean while P/L had drifted. The message must
+            # reflect the actual comparison; --alert still gates the nonzero
+            # exit.
+            print(f"DRIFT: P/L drift ${drift_val:.2f} exceeds threshold ${args.threshold}")
+            if args.alert:
+                print(f"ALERT: P/L drift ${drift_val:.2f} > ${args.threshold}")
+                sys.exit(1)
+            return
         else:
             print(f"OK Drift ${drift_val:.2f} within threshold ${args.threshold}")
             return
