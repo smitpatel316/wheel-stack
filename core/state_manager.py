@@ -1,6 +1,8 @@
 import json
 import os
 
+from datetime import datetime, timezone
+
 from .utils import parse_option_symbol
 from alpaca.trading.enums import AssetClass
 import logging
@@ -23,7 +25,20 @@ def load_roll_counts(path=ROLL_COUNTS_PATH):
         log.debug("[SWALLOWED] no roll-count file at %s yet (first run)", path)
         return {}
     except Exception as e:
-        log.warning("roll counts unreadable at %s, starting fresh: %r", path, e)
+        # 2026-09-09: never silently discard the roll cap. A corrupt file
+        # means a previous write died mid-dump; preserve the bytes for
+        # forensics and reset LOUDLY (mirrors the d045074 strategy_log.json
+        # fix - a quiet {} reset here lets an already-twice-rolled position
+        # roll again, compounding losses the cap exists to prevent).
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        corrupt_backup = f"{path}.corrupt-{ts}UTC"
+        try:
+            os.replace(path, corrupt_backup)
+        except Exception as be:
+            log.error("[SWALLOWED] roll-count backup of corrupt %s failed: %r", path, be)
+        log.error("[SWALLOWED] roll counts %s unreadable (%r) - moved to %s, "
+                  "cap reset to {} (was: risk control weakened, investigate)",
+                  path, e, corrupt_backup)
         return {}
 
 
