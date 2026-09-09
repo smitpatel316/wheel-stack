@@ -12,6 +12,8 @@ Uses raw REST because alpaca-py 0.43.5 lacks get_account_activities
 import os, requests, datetime, logging, time
 from typing import List, Dict, Optional
 
+from core.optionable_sync import _require_alpaca_client
+
 logger = logging.getLogger("strategy.activities_sync")
 OPTIONABLE_URL = os.getenv("OPTIONABLE_URL", "http://localhost:8096")
 TIMEOUT = 10
@@ -95,6 +97,8 @@ def _existing_fund_txns() -> List[Dict]:
 
 def sync_dividends_and_interest(client):
     """Sync DIV, INT, DIVNRA etc -> fund_transactions dividend/interest"""
+    if not _require_alpaca_client(client):
+        return
     if not os.getenv("OPTIONABLE_URL"):
         # check alive
         try:
@@ -175,6 +179,8 @@ def sync_dividends_and_interest(client):
 
 def sync_option_events(client):
     """Sync OPASN/OPEXP/OPEXC -> update trade status via sync_closed_trades logic + journal"""
+    if not _require_alpaca_client(client):
+        return
     from core.optionable_sync import sync_closed_trades
     # Reuse closed trades sync which handles assignment detection via positions
     # Additionally fetch OPASN/OPEXP activities to log
