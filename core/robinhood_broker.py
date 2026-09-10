@@ -25,13 +25,16 @@ import logging
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "robinhood-mcp"))
 
+from core.order_intent_ledger import IntentBlockedError, OrderIntentLedger  # noqa: E402
 from rh_order_client import (  # noqa: E402
     RHOrderError,
+    RHReviewBlockedError,
     _call_tool,
     dry_run_review,
     find_option_id,
@@ -124,7 +127,8 @@ class RobinhoodBrokerClient:
     # off this to stay away from the RH account.
     broker_name = "robinhood"
 
-    def __init__(self, data_client=None, live: bool = False, dry_run: bool = False):
+    def __init__(self, data_client=None, live: bool = False, dry_run: bool = False,
+                 ledger: OrderIntentLedger | None = None):
         if not live or os.getenv("RH_LIVE_ORDERS", "false").lower() not in ("1", "true", "yes"):
             raise RHOrderError(
                 "RobinhoodBrokerClient requires live=True AND RH_LIVE_ORDERS=true. "
@@ -134,6 +138,18 @@ class RobinhoodBrokerClient:
         self._dry_run = dry_run or os.getenv("RH_DRY_RUN", "false").lower() in ("1", "true", "yes")
         self._option_id_cache: dict = {}
         self._trade_client = _RHTradeClientShim(self)
+        # Every process gets its own run_id: intent keys are run-scoped, so a
+        # fresh decision each run is a new intent while adoption (same
+        # contract+side+effect+qty, non-terminal) dedupes across runs.
+        self._run_id = uuid.uuid4().hex
+        if ledger is None:
+            # ORDER_INTENT_DB overrides the path (tests use this for hermetic
+            # ledgers via tests/conftest.py; ops can point at a scratch DB).
+            db_path = os.getenv("ORDER_INTENT_DB") or (
+                Path(__file__).resolve().parent.parent / "state" / "order_intents.db")
+            ledger = OrderIntentLedger(db_path)
+        self._ledger = ledger
+        self._reconciled = False
         mode = "DRY-RUN (review only, never places)" if self._dry_run else "LIVE"
         logger.warning(f"[RH] RobinhoodBrokerClient initialized in {mode} mode")
 
@@ -157,20 +173,91 @@ class RobinhoodBrokerClient:
 
     def _place(self, occ_symbol: str, side: str, effect: str, qty: int,
                limit_price: float | None = None) -> _RHOrderView:
+        # Resolve any intents a previous run left unconfirmed before sending
+        # anything: trading while blind to our own orders is refused.
+        self._ensure_reconciled()
+        # Explicit pre-send eligibility gate: the ledger must never record
+        # PLACED_UNCONFIRMED for a failure that happened before the send
+        # (place_option_order re-checks internally; defense in depth).
+        acct = get_agentic_account()
+        last4 = str(acct.get("account_number") or "")[-4:]
         option_id = self._option_id(occ_symbol)
         legs = [{"option_id": option_id, "side": side,
                  "position_effect": effect, "ratio_quantity": 1}]
-        logical_key = f"{occ_symbol}:{side}:{effect}:{qty}"
         order_type = "limit" if limit_price else "market"
+        intent, created = self._ledger.begin_intent(
+            run_id=self._run_id, occ_symbol=occ_symbol, side=side,
+            effect=effect, qty=int(qty), order_type=order_type,
+            limit_price=float(limit_price) if limit_price is not None else None,
+            account_last4=last4)
+        if not created and intent.state == "PLACED" and intent.broker_order_id:
+            # A previous run already placed this trade: refresh its broker
+            # state and hand it back instead of placing a duplicate.
+            logger.warning("[LEDGER] adopting placed intent #%d (broker %s); "
+                           "not re-placing", intent.id, intent.broker_order_id)
+            return self.get_order(intent.broker_order_id)
         if self._dry_run:
             out = dry_run_review(legs, qty, order_type, limit_price)
+            self._ledger.mark_terminal(
+                intent.id, "DRY_RUN",
+                note=f"review_clean={out['review_clean']} (never placed)")
             logger.warning(f"[RH] DRY-RUN {side} {effect} {occ_symbol} x{qty} "
                            f"review_clean={out['review_clean']}")
-            return _RHOrderView({"id": f"dry-run-{logical_key}", "state": "dry_run",
+            return _RHOrderView({"id": f"dry-run-{intent.intent_key}", "state": "dry_run",
                                  "legs": []}, symbol=occ_symbol)
-        order = place_option_order(legs, qty, order_type, limit_price,
-                                   logical_key=logical_key, live=True)
+        try:
+            order = place_option_order(legs, qty, order_type, limit_price,
+                                       logical_key=intent.intent_key, live=True)
+        except RHReviewBlockedError:
+            self._ledger.mark_terminal(intent.id, "REJECTED_BY_REVIEW",
+                                       note="review_option_order returned order_checks")
+            raise
+        except Exception:
+            # The send may have happened: the order could be live on the
+            # broker with no local record. Never guess; reconcile next run.
+            self._ledger.mark_unconfirmed(intent.id)
+            raise
+        self._ledger.mark_placed(intent.id, broker_order_id=str(order.get("id")))
         return _RHOrderView(order, symbol=occ_symbol)
+
+    # ---------------------------------------------------------- ledger ops
+    def _ensure_reconciled(self) -> None:
+        """Once per process: resolve PLACED_UNCONFIRMED intents vs the broker.
+
+        Raises IntentBlockedError when unconfirmed intents exist and the
+        broker order list is unreadable (fail closed), or when an intent
+        needs human review.
+        """
+        if self._reconciled:
+            return
+        self._reconciled = True
+        report = self._ledger.reconcile(self._list_broker_orders)
+        if report["adopted"] or report["needs_review"]:
+            logger.warning("[LEDGER] reconcile: adopted=%s needs_review=%s",
+                           report["adopted"], report["needs_review"])
+
+    def _list_broker_orders(self) -> list:
+        acct = get_agentic_account()
+        data = _call_tool("get_option_orders",
+                         {"account_number": acct["account_number"]},
+                         label="ledger-reconcile-list")
+        return data.get("orders") or []
+
+    def _record_broker_outcome(self, broker_order_id: str, state: str,
+                               fill_qty=None, fill_avg_price=None) -> None:
+        mapping = {"filled": "FILLED", "cancelled": "CANCELLED",
+                   "rejected": "REJECTED", "failed": "REJECTED",
+                   "voided": "REJECTED"}
+        ledger_state = mapping.get(state)
+        if ledger_state is None:
+            return
+        try:
+            self._ledger.mark_by_broker_order(
+                broker_order_id, ledger_state,
+                fill_qty=fill_qty, fill_avg_price=fill_avg_price)
+        except Exception as e:
+            logger.debug("[SWALLOWED] ledger outcome record failed for %s: %r",
+                         broker_order_id, e)
 
     # ---------------------------------------------------------- orders
     def market_sell(self, symbol, qty=1):
@@ -196,12 +283,30 @@ class RobinhoodBrokerClient:
     def cancel_order(self, order_id):
         if str(order_id).startswith("dry-run-"):
             return None
-        return _rh_cancel(str(order_id), live=True)
+        out = _rh_cancel(str(order_id), live=True)
+        # Record the broker-observed outcome, not the request: a cancel that
+        # arrives after a fill must not rewrite a FILLED intent as CANCELLED.
+        try:
+            order = get_option_order(str(order_id))
+            if order is not None:
+                summary = order_fill_summary(order)
+                self._record_broker_outcome(
+                    str(order_id), summary["state"],
+                    fill_qty=summary.get("filled_qty"),
+                    fill_avg_price=summary.get("avg_fill_price"))
+        except Exception as e:
+            logger.debug("[SWALLOWED] post-cancel state poll failed for %s: %r",
+                         order_id, e)
+        return out
 
     def wait_for_fill(self, order_id, timeout_s: float = 30.0):
         if str(order_id).startswith("dry-run-"):
             return {"state": "dry_run", "filled_qty": 0, "avg_fill_price": None}
-        return wait_for_fill(str(order_id), timeout_s=timeout_s)
+        out = wait_for_fill(str(order_id), timeout_s=timeout_s)
+        self._record_broker_outcome(
+            str(order_id), str(out.get("state") or ""),
+            fill_qty=out.get("filled_qty"), fill_avg_price=out.get("avg_fill_price"))
+        return out
 
     def liquidate_all_positions(self):
         raise RHOrderError("liquidate_all_positions refused on Robinhood: "
