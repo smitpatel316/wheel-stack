@@ -62,6 +62,8 @@ def test_is_occ():
 def test_market_sell_dry_run_never_places(live_env):
     a = _adapter(dry_run=True)
     with mock.patch.object(rb, "find_option_id", return_value="opt-1") as f, \
+         mock.patch.object(rb, "get_agentic_account",
+                           return_value={"account_number": "000000005913"}), \
          mock.patch.object(rb, "dry_run_review",
                            return_value={"dry_run": True, "review_clean": True}) as r, \
          mock.patch.object(rb, "place_option_order") as p:
@@ -78,6 +80,8 @@ def test_market_sell_dry_run_never_places(live_env):
 def test_market_buy_maps_to_buy_to_close(live_env):
     a = _adapter()
     with mock.patch.object(rb, "find_option_id", return_value="opt-9"), \
+         mock.patch.object(rb, "get_agentic_account",
+                           return_value={"account_number": "000000005913"}), \
          mock.patch.object(rb, "place_option_order",
                            return_value={"id": "o-1", "state": "queued", "legs": []}) as p:
         view = a.market_buy("F260925P00012000", qty=1)
@@ -91,6 +95,8 @@ def test_market_buy_maps_to_buy_to_close(live_env):
 def test_limit_sell_passes_price(live_env):
     a = _adapter()
     with mock.patch.object(rb, "find_option_id", return_value="opt-1"), \
+         mock.patch.object(rb, "get_agentic_account",
+                           return_value={"account_number": "000000005913"}), \
          mock.patch.object(rb, "place_option_order",
                            return_value={"id": "o-2", "state": "queued", "legs": []}) as p:
         a.limit_sell("F260925P00012000", 1.55, qty=1)
@@ -101,6 +107,8 @@ def test_limit_sell_passes_price(live_env):
 def test_trade_client_shim(live_env):
     a = _adapter(dry_run=True)
     with mock.patch.object(rb, "find_option_id", return_value="opt-1"), \
+         mock.patch.object(rb, "get_agentic_account",
+                           return_value={"account_number": "000000005913"}), \
          mock.patch.object(rb, "dry_run_review",
                            return_value={"dry_run": True, "review_clean": True}) as r:
         buy_req = SimpleNamespace(symbol="F260925P00012000", qty=1,
@@ -116,7 +124,8 @@ def test_trade_client_shim(live_env):
 
 def test_cancel_get_order(live_env):
     a = _adapter()
-    with mock.patch.object(rb, "_rh_cancel", return_value={"ok": True}) as c:
+    with mock.patch.object(rb, "_rh_cancel", return_value={"ok": True}) as c, \
+         mock.patch.object(rb, "get_option_order", return_value=None):
         a.cancel_order("o-1")
         c.assert_called_once_with("o-1", live=True)
     with mock.patch.object(rb, "get_option_order",
