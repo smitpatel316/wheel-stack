@@ -54,6 +54,18 @@ logger = logging.getLogger(__name__)
 OCC_RE = re.compile(r"^([A-Za-z]+)(\d{6})([PC])(\d{8})$")
 
 
+class RHOrderFilledError(RHOrderError):
+    """Post-cancel observation: the order is already filled.
+
+    Raised by cancel_order() instead of returning normally when the
+    post-cancel poll observes a filled order. Callers that branch on
+    cancel failure (the engine's limit -> cancel -> market fallback treats
+    a failed cancel as "re-check for a fill") must take the fill path --
+    a silent return would send them down the market fallback and place a
+    SECOND order for the same contract.
+    """
+
+
 def _to_occ(underlying: str, expiration: str, strike: float, option_type: str) -> str:
     """Build an OCC symbol the engine's parse_option_symbol accepts."""
     yymmdd = expiration.replace("-", "")[2:]
@@ -288,15 +300,29 @@ class RobinhoodBrokerClient:
         # arrives after a fill must not rewrite a FILLED intent as CANCELLED.
         try:
             order = get_option_order(str(order_id))
-            if order is not None:
-                summary = order_fill_summary(order)
-                self._record_broker_outcome(
-                    str(order_id), summary["state"],
-                    fill_qty=summary.get("filled_qty"),
-                    fill_avg_price=summary.get("avg_fill_price"))
         except Exception as e:
             logger.debug("[SWALLOWED] post-cancel state poll failed for %s: %r",
                          order_id, e)
+            return out
+        if order is not None:
+            summary = order_fill_summary(order)
+            self._record_broker_outcome(
+                str(order_id), summary["state"],
+                fill_qty=summary.get("filled_qty"),
+                fill_avg_price=summary.get("avg_fill_price"))
+            if summary["state"] == "filled":
+                # The order filled in the race window between the engine's
+                # fill check and this cancel: the cancel arrived too late
+                # (the broker treated it as a no-op success instead of
+                # raising). Raise loudly -- the engine's limit -> cancel ->
+                # market flow treats a failed cancel as "re-check for a
+                # fill", and a silent return here would send it down the
+                # market-fallback path and place a SECOND order for the same
+                # contract.
+                raise RHOrderFilledError(
+                    f"RH order {order_id} filled before the cancel completed "
+                    f"(qty {summary.get('filled_qty')} @ "
+                    f"{summary.get('avg_fill_price')}); not falling back")
         return out
 
     def wait_for_fill(self, order_id, timeout_s: float = 30.0):
