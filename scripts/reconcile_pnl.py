@@ -39,7 +39,15 @@ def main():
         print("=== P/L Reconciliation (v2.6.0 unified) ===")
         print(json.dumps(result, indent=2, default=str))
 
-        drift = result.get("discrepancy", 0)
+        # 2026-09-10 (reporting audit): get_pnl_summary_for_logging returns the
+        # FLATTENED keys (real_pnl_* / optionable_pnl / pnl_discrepancy) - the
+        # old code read result["discrepancy"], which never exists on the live
+        # shape, so drift was always $0.00 and the nightly log looked clean no
+        # matter how far real vs Optionable P/L had drifted. Read the flat key
+        # first; keep the legacy numeric and dict fallback shapes working.
+        drift = result.get("pnl_discrepancy", None)
+        if drift is None:
+            drift = result.get("discrepancy", 0)
         if isinstance(drift, dict):
             drift = drift.get("inflated_vs_real", 0) or drift.get("value", 0) or 0
         try:
