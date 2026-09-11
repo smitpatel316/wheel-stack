@@ -217,6 +217,11 @@ class RobinhoodBrokerClient:
                            f"review_clean={out['review_clean']}")
             return _RHOrderView({"id": f"dry-run-{intent.intent_key}", "state": "dry_run",
                                  "legs": []}, symbol=occ_symbol)
+        # The crash-safety Rubicon: from this write on, the send may happen.
+        # A kill after this point leaves a SENDING row, which reconcile()
+        # resolves against the broker instead of begin_intent() STALing it
+        # (STALing would allow a duplicate placement with a new ref_id).
+        self._ledger.mark_sending(intent.id)
         try:
             order = place_option_order(legs, qty, order_type, limit_price,
                                        logical_key=intent.intent_key, live=True)
@@ -243,7 +248,11 @@ class RobinhoodBrokerClient:
         if self._reconciled:
             return
         self._reconciled = True
-        report = self._ledger.reconcile(self._list_broker_orders)
+        # run_id lets reconcile() promote previous runs' SENDING intents
+        # (killed between the send and the ledger write) instead of
+        # begin_intent() STALing them into a duplicate placement.
+        report = self._ledger.reconcile(self._list_broker_orders,
+                                        run_id=self._run_id)
         if report["adopted"] or report["needs_review"]:
             logger.warning("[LEDGER] reconcile: adopted=%s needs_review=%s",
                            report["adopted"], report["needs_review"])
