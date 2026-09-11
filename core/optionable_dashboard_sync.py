@@ -121,7 +121,7 @@ _RE_LIQ = re.compile(r"\[LIQ\] Drying detected: \[(.*)\]")
 _RE_LIQ_SYM = re.compile(r"'([A-Z.]+)'")
 _RE_REJECTS = re.compile(r"\[DATA\] option filter rejected all (\d+) contracts: (\{.*\})")
 _RE_REJECT_PAIR = re.compile(r"'(\w+)': (\d+)")
-_RE_LOGGED_CSP = re.compile(r"Optionable: logged CSP ([A-Z]+) \$([\d.]+) exp ([\d-]+)")
+_RE_LOGGED_TRADE = re.compile(r"Optionable: logged (CSP|CC) ([A-Z]+) \$([\d.]+) exp ([\d-]+)")
 _RE_SELL_FAILED = re.compile(r"Sell failed for ([A-Z]+\d{6}[PC]\d+)")
 _RE_SKIP_OBP = re.compile(r"Skipping ([A-Z]+\d{6}[PC]\d+) strike \$([\d.]+): needs \$([\d.]+) > Alpaca options BP \$([\d.]+)")
 _RE_SKIP_BP = re.compile(r"Skipping ([A-Z]+\d{6}[PC]\d+) strike \$([\d.]+) need \$([\d.]+) > BP \$([\d.]+)")
@@ -388,17 +388,20 @@ class EngineDashboardPush:
             for k, v in _RE_REJECT_PAIR.findall(m.group(2)):
                 self.aggregate_rejects[k] = self.aggregate_rejects.get(k, 0) + int(v)
             return
-        m = _RE_LOGGED_CSP.search(line)
+        m = _RE_LOGGED_TRADE.search(line)
         if m:
             # Only a successful fill reaches Optionable logging — the
-            # "Selling put:" line fires before the order attempt.
+            # "Selling put:" line fires before the order attempt. Both CSP
+            # and CC pushes count as sold (the old regex only matched CSP,
+            # so covered calls never showed up in the scan funnel).
+            suffix = "P" if m.group(1) == "CSP" else "C"
             try:
-                exp = m.group(3)
-                detail = f"${m.group(2)}P {exp[5:7]}/{exp[8:10]}"
+                exp = m.group(4)
+                detail = f"${m.group(3)}{suffix} {exp[5:7]}/{exp[8:10]}"
             except Exception as e:
-                logger.debug("[SWALLOWED] CSP detail date formatting failed, using strike only: %r", e)
-                detail = f"${m.group(2)}P"
-            self.actions[m.group(1)] = ("sold", detail)
+                logger.debug("[SWALLOWED] trade detail date formatting failed, using strike only: %r", e)
+                detail = f"${m.group(3)}{suffix}"
+            self.actions[m.group(2)] = ("sold", detail)
             return
         m = _RE_SELL_FAILED.search(line)
         if m:
@@ -425,6 +428,20 @@ class EngineDashboardPush:
              allowed_symbols: Optional[List[str]] = None, slot: str = ""):
         """POST the snapshot + scan funnel to Optionable. Never raises."""
         try:
+            # Broker isolation (2026-09-10): the Optionable dashboard tracks
+            # the Alpaca paper account. An RH-mode run's account snapshot and
+            # RH positions would overwrite it with wrong-account data — the
+            # same incident class as the 2026-09-08 phantom trades.
+            # RH-native dashboard sync is future work; skip loudly.
+            if client is not None:
+                _bn = (getattr(client, "broker_name", "") or "").lower()
+            else:
+                _bn = os.getenv("BROKER", "alpaca").lower()
+            if _bn == "robinhood":
+                logger.warning(
+                    "[DASH] Robinhood mode: skipping engine dashboard push - "
+                    "the Optionable dashboard tracks the Alpaca paper account")
+                return False
             symbols_all = list(symbols_all or [])
             allowed = set(allowed_symbols or [])
             rows = []

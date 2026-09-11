@@ -545,13 +545,24 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
 
         try:
             from core.optionable_sync import push_trade_to_optionable
-            # Dashboard entry price must be the ACTUAL open fill when the poll
-            # above confirmed it - pushing the scan-time bid estimate
-            # mismatches the broker fill on the dashboard (2026-09-08: bid
-            # estimate $1.56 vs real $3.80 fill). Matches the pattern already
-            # used in core/execution.py (fill price, else estimate).
-            open_px = open_fill_px if open_fill_px is not None else target.bid_price
-            push_trade_to_optionable(target.symbol, open_px, contracts=abs(candidate.qty), delta=target.delta)
+            # Broker isolation (2026-09-10): the Optionable new-trade push is
+            # paper-account machinery. A dry run places nothing (2026-09-08
+            # phantom-trade incident), and RH fills belong to the RH account,
+            # never the paper tracker. Mirrors the guard in core/execution.py.
+            _broker_name = (getattr(client, "broker_name", "alpaca") or "alpaca").lower()
+            _dry_run = bool(getattr(client, "dry_run", False))
+            if _dry_run:
+                log.info(f"[DRY-RUN] {target.symbol} roll validated - not pushed to Optionable (no real order)")
+            elif _broker_name == "robinhood":
+                log.info(f"[SYNC] Robinhood mode: skipping Optionable push for roll target {target.symbol}")
+            else:
+                # Dashboard entry price must be the ACTUAL open fill when the poll
+                # above confirmed it - pushing the scan-time bid estimate
+                # mismatches the broker fill on the dashboard (2026-09-08: bid
+                # estimate $1.56 vs real $3.80 fill). Matches the pattern already
+                # used in core/execution.py (fill price, else estimate).
+                open_px = open_fill_px if open_fill_px is not None else target.bid_price
+                push_trade_to_optionable(target.symbol, open_px, contracts=abs(candidate.qty), delta=target.delta)
             # Also sync closed trade with real close price
             from core.optionable_sync import sync_closed_trades, get_close_price_from_activities
             real_close_price = get_close_price_from_activities(client, candidate.symbol)
