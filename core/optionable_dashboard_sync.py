@@ -425,6 +425,20 @@ class EngineDashboardPush:
              allowed_symbols: Optional[List[str]] = None, slot: str = ""):
         """POST the snapshot + scan funnel to Optionable. Never raises."""
         try:
+            # Broker isolation (2026-09-10): the Optionable dashboard tracks
+            # the Alpaca paper account. An RH-mode run's account snapshot and
+            # RH positions would overwrite it with wrong-account data — the
+            # same incident class as the 2026-09-08 phantom trades.
+            # RH-native dashboard sync is future work; skip loudly.
+            if client is not None:
+                _bn = (getattr(client, "broker_name", "") or "").lower()
+            else:
+                _bn = os.getenv("BROKER", "alpaca").lower()
+            if _bn == "robinhood":
+                logger.warning(
+                    "[DASH] Robinhood mode: skipping engine dashboard push - "
+                    "the Optionable dashboard tracks the Alpaca paper account")
+                return False
             symbols_all = list(symbols_all or [])
             allowed = set(allowed_symbols or [])
             rows = []
