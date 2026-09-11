@@ -26,6 +26,28 @@ import urllib.request
 logging.basicConfig(stream=sys.stderr, format="%(message)s")
 logger = logging.getLogger("postrun_verify")
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+
+def _outbox_dir():
+    """The engine's real outbox location (core.sync_outbox.outbox_dir).
+
+    2026-09-10 (reporting audit): the old code hardcoded
+    state/sync-outbox, but the engine honors SYNC_OUTBOX_DIR - so with the
+    env set the verifier reported "outbox empty" while payloads sat in the
+    real outbox (seen in logs/e2e-killpi-drill.log: optionable-sync FAIL
+    "held in local outbox" alongside outbox-empty PASS). Ask the engine.
+    """
+    try:
+        from core.sync_outbox import outbox_dir
+        return str(outbox_dir())
+    except Exception as e:
+        logger.warning("[SWALLOWED] outbox_dir import failed, falling back to env/default: %r", e)
+        env = os.environ.get("SYNC_OUTBOX_DIR", "").strip()
+        return env or os.path.join(_REPO_ROOT, "state", "sync-outbox")
+
 
 # --- Action extraction ------------------------------------------------------
 # Keep ONLY transactional evidence: real order submissions/fills, executed
@@ -173,9 +195,10 @@ def main():
     else:
         check("dash-push", False, "no [DASH] evidence in log")
 
-    # 6. Outbox drained empty by run end (BASE dir is wheel-stack)
-    outbox = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "state", "sync-outbox")
+    # 6. Outbox drained empty by run end - use the ENGINE's outbox location
+    # (core.sync_outbox.outbox_dir, honors SYNC_OUTBOX_DIR), not a hardcoded
+    # path; otherwise this check can disagree with the optionable-sync check.
+    outbox = _outbox_dir()
     pending = len([f for f in os.listdir(outbox) if f.endswith(".json")]) if os.path.isdir(outbox) else 0
     check("outbox-empty", pending == 0, f"{pending} payload(s) retained for next run"
           if pending else "empty")
