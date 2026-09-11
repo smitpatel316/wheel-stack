@@ -151,7 +151,16 @@ def main():
         print("usage: postrun_verify.py <run-log>", file=sys.stderr)
         sys.exit(64)
     LOG = sys.argv[1]
-    text = open(LOG, errors="replace").read()
+    # 2026-09-10 (reporting audit): a wrong/missing log path used to die with
+    # a raw FileNotFoundError traceback. A verifier must always produce a
+    # verdict the reporting agent can relay.
+    try:
+        text = open(LOG, errors="replace").read()
+    except OSError as e:
+        logger.error("cannot read run log %s: %r", LOG, e)
+        print("VERDICT: FAIL")
+        print(f"  FAIL engine-log: cannot read {LOG}: {type(e).__name__}: {e}")
+        sys.exit(1)
     lines = text.splitlines()
 
     checks = []
@@ -181,8 +190,17 @@ def main():
     if re.search(r"Synced positions to Optionable tracker", text):
         check("optionable-sync", True, re.search(r"Synced positions to Optionable tracker \(([^)]*)\)", text).group(1))
     elif re.search(r"held in local outbox|not reachable", text, re.I):
+        # 2026-09-10 (reporting audit): the old one-liner called .group(0) on
+        # the first non-None of two regexes, but BOTH can be None - e.g. the
+        # engine's current "Optionable not reachable - N payload(s) held in
+        # local outbox" line carries no [SYNC] prefix - so the verifier died
+        # with AttributeError instead of printing a verdict. Degrade to the
+        # plain-text line, never crash.
+        detail_m = (re.search(r"\[SYNC\] (.*)", text)
+                    or re.search(r"\[([^]\n]*?(?:not reachable|held in local outbox)[^]\n]*?)\]", text, re.I)
+                    or re.search(r"^.*(?:not reachable|held in local outbox).*$", text, re.I | re.M))
         check("optionable-sync", False,
-              (re.search(r"\[SYNC\] (.*)", text) or re.search(r"\[(.*?not reachable.*?)\]", text)).group(0)[:140])
+              (detail_m.group(0) if detail_m else "sync evidence found but detail line unparseable")[:140])
     else:
         check("optionable-sync", False, "no sync evidence found in log")
 
