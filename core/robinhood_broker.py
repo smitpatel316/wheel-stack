@@ -54,6 +54,18 @@ logger = logging.getLogger(__name__)
 OCC_RE = re.compile(r"^([A-Za-z]+)(\d{6})([PC])(\d{8})$")
 
 
+class RHOrderFilledError(RHOrderError):
+    """Post-cancel observation: the order is already filled.
+
+    Raised by cancel_order() instead of returning normally when the
+    post-cancel poll observes a filled order. Callers that branch on
+    cancel failure (the engine's limit -> cancel -> market fallback treats
+    a failed cancel as "re-check for a fill") must take the fill path --
+    a silent return would send them down the market fallback and place a
+    SECOND order for the same contract.
+    """
+
+
 def _to_occ(underlying: str, expiration: str, strike: float, option_type: str) -> str:
     """Build an OCC symbol the engine's parse_option_symbol accepts."""
     yymmdd = expiration.replace("-", "")[2:]
@@ -205,6 +217,11 @@ class RobinhoodBrokerClient:
                            f"review_clean={out['review_clean']}")
             return _RHOrderView({"id": f"dry-run-{intent.intent_key}", "state": "dry_run",
                                  "legs": []}, symbol=occ_symbol)
+        # The crash-safety Rubicon: from this write on, the send may happen.
+        # A kill after this point leaves a SENDING row, which reconcile()
+        # resolves against the broker instead of begin_intent() STALing it
+        # (STALing would allow a duplicate placement with a new ref_id).
+        self._ledger.mark_sending(intent.id)
         try:
             order = place_option_order(legs, qty, order_type, limit_price,
                                        logical_key=intent.intent_key, live=True)
@@ -231,7 +248,11 @@ class RobinhoodBrokerClient:
         if self._reconciled:
             return
         self._reconciled = True
-        report = self._ledger.reconcile(self._list_broker_orders)
+        # run_id lets reconcile() promote previous runs' SENDING intents
+        # (killed between the send and the ledger write) instead of
+        # begin_intent() STALing them into a duplicate placement.
+        report = self._ledger.reconcile(self._list_broker_orders,
+                                        run_id=self._run_id)
         if report["adopted"] or report["needs_review"]:
             logger.warning("[LEDGER] reconcile: adopted=%s needs_review=%s",
                            report["adopted"], report["needs_review"])
@@ -286,17 +307,29 @@ class RobinhoodBrokerClient:
         out = _rh_cancel(str(order_id), live=True)
         # Record the broker-observed outcome, not the request: a cancel that
         # arrives after a fill must not rewrite a FILLED intent as CANCELLED.
+        # And it must not RETURN normally either: the engine's limit -> cancel
+        # -> market flow treats a failed cancel as "re-check for a fill", but
+        # a silent return sends it down the market-fallback path and places a
+        # SECOND order for the same contract. So a broker-observed fill after
+        # the cancel raises RHOrderFilledError, routing the engine to its
+        # existing race handler (re-check the order, return the limit fill).
         try:
             order = get_option_order(str(order_id))
-            if order is not None:
-                summary = order_fill_summary(order)
-                self._record_broker_outcome(
-                    str(order_id), summary["state"],
-                    fill_qty=summary.get("filled_qty"),
-                    fill_avg_price=summary.get("avg_fill_price"))
         except Exception as e:
             logger.debug("[SWALLOWED] post-cancel state poll failed for %s: %r",
                          order_id, e)
+            return out
+        if order is not None:
+            summary = order_fill_summary(order)
+            self._record_broker_outcome(
+                str(order_id), summary["state"],
+                fill_qty=summary.get("filled_qty"),
+                fill_avg_price=summary.get("avg_fill_price"))
+            if summary["state"] == "filled":
+                raise RHOrderFilledError(
+                    f"RH order {order_id} filled before the cancel completed "
+                    f"(qty {summary.get('filled_qty')} @ "
+                    f"{summary.get('avg_fill_price')}); not falling back")
         return out
 
     def wait_for_fill(self, order_id, timeout_s: float = 30.0):

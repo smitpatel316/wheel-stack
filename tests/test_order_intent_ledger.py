@@ -139,7 +139,10 @@ def test_reconcile_adopts_by_ref_id(ledger):
 def test_reconcile_fallback_side_qty_time(ledger):
     intent, _ = _begin(ledger)
     ledger.mark_unconfirmed(intent.id)
-    orders = [_broker_order(ref_id="something-else", oid="ord-x")]  # no ref_id field match
+    # Anonymous order (no ref_id): eligible for the side/qty/time fallback.
+    # An order carrying a DIFFERENT intent's ref_id is never adopted here
+    # (see test_reconcile_fallback_ignores_foreign_ref_id).
+    orders = [_broker_order(ref_id=None, oid="ord-x")]
     report = ledger.reconcile(lambda: orders)
     assert report["adopted"] == [intent.id]
     assert ledger.get(intent.id).broker_order_id == "ord-x"
@@ -297,3 +300,124 @@ def test_adapter_reconcile_runs_once_before_first_place(monkeypatch, tmp_path):
         a._place("F260926P00012000", "sell", "open", 1)
     assert lists == [1]  # exactly one broker list call
     assert a._reconciled is True
+
+
+# ---------------------------------------------------------------- SENDING Rubicon
+def test_sending_promoted_and_adopted_on_reconcile(ledger):
+    """Kill between broker-ack and mark_placed: the SENDING row must be
+    adopted by ref_id on the next run, never STALEd into a duplicate."""
+    intent, _ = _begin(ledger, run_id="run1", order_type="limit",
+                       limit_price=1.55)
+    ledger.mark_sending(intent.id)
+    # ... process killed here; the broker HAS the order ...
+    orders = [{"id": "o-live", "ref_id": intent.ref_id, "state": "confirmed",
+               "quantity": "1", "created_at": intent.created_at,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders, run_id="run2")
+    assert report == {"adopted": [intent.id], "needs_review": []}
+    done = ledger.get(intent.id)
+    assert done.state == "PLACED" and done.broker_order_id == "o-live"
+
+
+def test_sending_no_match_needs_review_and_blocks(ledger):
+    """SENDING with no broker match: fail closed, never silently STALEd."""
+    intent, _ = _begin(ledger, run_id="run1")
+    ledger.mark_sending(intent.id)
+    report = ledger.reconcile(lambda: [], run_id="run2")
+    assert report["needs_review"] == [intent.id]
+    assert ledger.get(intent.id).state == "NEEDS_REVIEW"
+    with pytest.raises(IntentBlockedError):
+        _begin(ledger, run_id="run2")
+    ledger.resolve(intent.id, "ABANDONED", note="verified never sent")
+    fresh, created = _begin(ledger, run_id="run2")
+    assert created is True
+
+
+def test_begin_intent_refuses_unreconciled_sending(ledger):
+    """begin_intent without a prior reconcile must not adopt/STALE a
+    previous run's SENDING row."""
+    intent, _ = _begin(ledger, run_id="run1")
+    ledger.mark_sending(intent.id)
+    with pytest.raises(IntentBlockedError, match="reconcile"):
+        _begin(ledger, run_id="run2")
+
+
+def test_previous_run_intended_without_sending_still_staled(ledger):
+    """INTENDED rows whose send was never attempted (SENDING never written)
+    are provably never-sent: STALing stays sound."""
+    old, _ = _begin(ledger, run_id="run-old")
+    new, created = _begin(ledger, run_id="run-new", occ="G260926P00010000")
+    assert created is True
+    assert ledger.get(old.id).state == "STALE"
+    assert ledger.get(new.id).state == "INTENDED"
+
+
+def test_adapter_marks_sending_before_transport(monkeypatch, tmp_path):
+    """The adapter writes the SENDING Rubicon before the transport send, so
+    a kill inside place_option_order is recoverable via reconcile."""
+    a, ledger, rb = _adapter(monkeypatch, tmp_path)
+    seen = {}
+
+    def _spy(*a_, **k):
+        seen["state"] = ledger.list()[0].state
+        return {"id": "ord-1", "state": "confirmed"}
+
+    monkeypatch.setattr(rb, "place_option_order", _spy)
+    a._place("F260926P00012000", "sell", "open", 1)
+    assert seen["state"] == "SENDING"
+    assert ledger.list()[0].state == "PLACED"
+
+
+def test_reconcile_without_run_id_skips_promotion(ledger):
+    """Backward compatible: reconcile() with no run_id behaves as before."""
+    intent, _ = _begin(ledger, run_id="run1")
+    ledger.mark_sending(intent.id)
+    report = ledger.reconcile(lambda: [])
+    assert report == {"adopted": [], "needs_review": []}
+    # SENDING untouched without a run_id to compare against.
+    assert ledger.get(intent.id).state == "SENDING"
+
+
+# ------------------------------------------------- ref_id-authoritative fallback
+def test_reconcile_fallback_ignores_foreign_ref_id(ledger):
+    """The weak side/qty/time fallback must not adopt a broker order that
+    carries a DIFFERENT intent's ref_id (e.g. a same-sized AAPL order
+    adopted for an F intent would record the wrong fills)."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    created = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    orders = [{"id": "o-other", "ref_id": "someone-elses-ref-id",
+               "state": "confirmed", "quantity": "1", "created_at": created,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)
+    assert report == {"adopted": [], "needs_review": [intent.id]}
+    assert ledger.get(intent.id).broker_order_id is None
+    assert ledger.get(intent.id).state == "NEEDS_REVIEW"
+
+
+def test_reconcile_fallback_still_matches_anonymous_order(ledger):
+    """Anonymous orders (no ref_id at all) remain eligible for the
+    side/qty/time fallback."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    created = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    orders = [{"id": "o-anon", "state": "confirmed", "quantity": "1",
+               "created_at": created,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)
+    assert report["adopted"] == [intent.id]
+    assert ledger.get(intent.id).broker_order_id == "o-anon"
+
+
+def test_reconcile_tolerates_naive_broker_timestamp(ledger):
+    """A broker order with an offset-less created_at must not raise
+    TypeError out of reconcile (treated as UTC)."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    naive = (datetime.now(timezone.utc)
+             - timedelta(minutes=2)).replace(tzinfo=None).isoformat()
+    orders = [{"id": "o-x", "ref_id": None, "state": "confirmed",
+               "quantity": "1", "created_at": naive,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)  # must not raise
+    assert report["adopted"] == [intent.id]

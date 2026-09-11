@@ -16,10 +16,17 @@ so a crash between any two steps leaves a recoverable row instead of a guess.
 State machine:
     INTENDED --review blocked--> REJECTED_BY_REVIEW (terminal)
              --dry run---------> DRY_RUN (terminal, audit only)
+             --send attempted--> SENDING --place raised--> PLACED_UNCONFIRMED
+                                          --placed ok----> PLACED
              --place raised---> PLACED_UNCONFIRMED --reconcile--> PLACED
                                                          \\--> NEEDS_REVIEW (terminal-ish,
                                                                 contract blocked)
              --placed ok------> PLACED --poll--> FILLED | CANCELLED | REJECTED
+    SENDING is the crash-safety Rubicon: it is written immediately BEFORE the
+    transport send. A previous run's INTENDED row (SENDING never written)
+    provably never reached the send and is safe to STALE; a previous run's
+    SENDING row may have reached the broker and is promoted to
+    PLACED_UNCONFIRMED by reconcile() -- never STALEd.
     Any INTENDED row from a previous run_id is marked STALE when a new run
     begins an intent. UNKNOWN is set when the broker cannot be read during
     reconcile: fail closed, no new placements until reconcile succeeds.
@@ -61,8 +68,10 @@ logger = logging.getLogger(__name__)
 UUID5_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 # Non-terminal states: an intent in one of these still represents a live
-# economic position the engine must not duplicate.
-OPEN_STATES = {"INTENDED", "PLACED", "PLACED_UNCONFIRMED", "UNKNOWN"}
+# economic position the engine must not duplicate. SENDING (the send was
+# attempted but the outcome is unrecorded) is the most dangerous: it may
+# already be a live broker order.
+OPEN_STATES = {"INTENDED", "SENDING", "PLACED", "PLACED_UNCONFIRMED", "UNKNOWN"}
 
 # States that block a new intent for the same contract+side+effect until a
 # human resolves them.
@@ -230,7 +239,12 @@ class OrderIntentLedger:
         type_l = order_type.lower()
         px = float(limit_price) if limit_price is not None else None
         with self._lock:
-            # Previous runs' never-sent intents are dead letters, not blockers.
+            # Previous runs' never-sent intents are dead letters, not
+            # blockers. This is sound ONLY because of the SENDING Rubicon:
+            # any intent that reached the transport send was marked SENDING
+            # first, so a previous run's INTENDED row provably never reached
+            # the send. (Previous runs' SENDING rows are promoted by
+            # reconcile(), never STALEd -- see _promote_interrupted_sends.)
             self._conn.execute(
                 "UPDATE intents SET state='STALE', updated_at=? "
                 "WHERE state='INTENDED' AND run_id != ?",
@@ -246,6 +260,22 @@ class OrderIntentLedger:
                     f"trade {occ} {side_l}/{effect_l} blocked by intent "
                     f"#{blocker['id']} in state {blocker['state']}: resolve it "
                     f"first (core/order_intent_ledger.py resolve)")
+            sending = self._conn.execute(
+                "SELECT id, run_id FROM intents WHERE occ_symbol=? AND side=? "
+                "AND effect=? AND state='SENDING' "
+                "ORDER BY id DESC LIMIT 1",
+                (occ, side_l, effect_l)).fetchone()
+            if sending:
+                # A previous run attempted this send and died before
+                # recording the outcome. reconcile() (which the adapter runs
+                # at startup before any begin_intent) promotes these -- if
+                # you are here without reconciling, do that first.
+                self._conn.commit()
+                raise IntentBlockedError(
+                    f"trade {occ} {side_l}/{effect_l} has intent "
+                    f"#{sending['id']} in SENDING (run {sending['run_id'][:8]} "
+                    f"may have placed it): run reconcile() first; the "
+                    f"adapter does this automatically at startup")
             existing = self._conn.execute(
                 "SELECT * FROM intents WHERE occ_symbol=? AND side=? AND effect=? "
                 "AND state IN ('INTENDED','PLACED','PLACED_UNCONFIRMED','UNKNOWN') "
@@ -301,6 +331,19 @@ class OrderIntentLedger:
             intent_id, "PLACED_UNCONFIRMED",
             note=note or "place call raised after send; broker state unknown")
 
+    def mark_sending(self, intent_id: int) -> Intent:
+        """The transport send is about to happen.
+
+        This is the crash-safety Rubicon and MUST be called immediately
+        before the send (the adapter does this). A kill after this write
+        leaves a SENDING row, which reconcile() promotes to
+        PLACED_UNCONFIRMED and resolves against the broker -- it is never
+        silently STALEd, so the next run cannot place a duplicate.
+        """
+        return self._set_state(
+            intent_id, "SENDING",
+            note="send attempted; broker state unknown until reconcile")
+
     def mark_terminal(self, intent_id: int, state: str, *,
                       fill_qty: float | None = None,
                       fill_avg_price: float | None = None,
@@ -331,17 +374,48 @@ class OrderIntentLedger:
                                fill_qty=fill_qty, fill_avg_price=fill_avg_price)
 
     # ------------------------------------------------------------ reconcile
-    def reconcile(self, list_orders_fn) -> dict:
+    def _promote_interrupted_sends(self, run_id: str) -> int:
+        """Crash recovery for the kill window between broker-ack and the
+        ledger write (or mid-send with the response lost).
+
+        A previous run's SENDING row may already be a live broker order, so
+        it must NOT be STALEd: promote it to PLACED_UNCONFIRMED so the
+        reconcile below resolves it against the broker (ref_id match ->
+        adopted; no match -> NEEDS_REVIEW, never silently abandoned).
+        Returns the number of rows promoted.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE intents SET state='PLACED_UNCONFIRMED', "
+                "note='promoted by reconcile: the send may have completed "
+                "before the crash; resolving against the broker', "
+                "updated_at=? "
+                "WHERE state='SENDING' AND run_id != ?",
+                (_utcnow(), run_id))
+            self._conn.commit()
+            return cur.rowcount
+
+    def reconcile(self, list_orders_fn, run_id=None) -> dict:
         """Resolve every PLACED_UNCONFIRMED intent against the broker.
 
         list_orders_fn: zero-arg callable returning a list of broker order
         dicts (id, state, legs[{side, position_effect}], quantity, and
         optionally ref_id / created_at).
 
+        run_id: when given, previous runs' SENDING intents (killed between
+        the send and the ledger write) are promoted to PLACED_UNCONFIRMED
+        first, so they are resolved here instead of being STALEd by
+        begin_intent() -- STALing them would allow a duplicate placement.
+
         Returns {"adopted": [...], "needs_review": [...]}.
         Raises IntentBlockedError (rows -> UNKNOWN) when the broker order
         list itself is unreadable: trading blind is refused.
         """
+        if run_id is not None:
+            promoted = self._promote_interrupted_sends(run_id)
+            if promoted:
+                logger.warning("[LEDGER] reconcile: promoted %d interrupted "
+                               "send(s) to PLACED_UNCONFIRMED", promoted)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM intents WHERE state='PLACED_UNCONFIRMED' "
@@ -427,7 +501,11 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
     """Match an unconfirmed intent to a broker order.
 
     Returns the order dict, None (no match), or "AMBIGUOUS" (>1 match).
-    ref_id is authoritative when present; otherwise side+qty+time window.
+    ref_id is authoritative when present. The side+qty+time fallback only
+    matches orders with NO ref_id: an order stamped with a different
+    intent's ref_id belongs to that intent and is never adopted here.
+    Naive (offset-less) broker timestamps are treated as UTC rather than
+    crashing the reconcile.
     """
     by_ref = [o for o in orders
               if str(o.get("ref_id") or "") == intent.ref_id]
@@ -443,6 +521,12 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
         return None
     cands = []
     for o in orders:
+        # ref_id is authoritative: an order stamped with a DIFFERENT
+        # intent's ref_id belongs to that intent and must never be adopted
+        # by the weak side/qty/time fallback below. (A matching ref_id was
+        # already consumed by the primary loop above.)
+        if str(o.get("ref_id") or "") and str(o.get("ref_id")) != intent.ref_id:
+            continue
         legs = o.get("legs") or []
         leg = legs[0] if legs else {}
         o_side = str(leg.get("side") or "").lower()
@@ -464,6 +548,11 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
             logger.debug("[SWALLOWED] broker order %s unparseable created_at %r",
                          o.get("id"), ts)
             continue
+        if o_created.tzinfo is None:
+            # The broker omitted the UTC offset. Normalize to UTC (the
+            # broker's API emits UTC) rather than letting a naive/aware
+            # subtraction raise TypeError and kill the whole reconcile.
+            o_created = o_created.replace(tzinfo=timezone.utc)
         if abs((o_created - created).total_seconds()) <= RECONCILE_WINDOW_S:
             cands.append(o)
     if len(cands) == 1:

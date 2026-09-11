@@ -125,7 +125,9 @@ def test_trade_client_shim(live_env):
 def test_cancel_get_order(live_env):
     a = _adapter()
     with mock.patch.object(rb, "_rh_cancel", return_value={"ok": True}) as c, \
-         mock.patch.object(rb, "get_option_order", return_value=None):
+         mock.patch.object(rb, "get_option_order",
+                           return_value={"id": "o-1", "state": "cancelled",
+                                         "legs": []}):
         a.cancel_order("o-1")
         c.assert_called_once_with("o-1", live=True)
     with mock.patch.object(rb, "get_option_order",

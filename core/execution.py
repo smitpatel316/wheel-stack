@@ -179,6 +179,20 @@ def place_limit_or_market_sell(client, contract_obj, strat_logger=None, enable_l
                     except Exception as e:
                         logger.warning("[SWALLOWED] cancel_order failed for %s (order %s) after fill-check error: %r", symbol, order_id, e)
                         pass
+                    # The cancel above may have discovered the order actually
+                    # filled while we were blind (the RH adapter raises when
+                    # its post-cancel poll observes a fill; other brokers may
+                    # report it here too). Re-verify before the market
+                    # fallback: falling back on a filled order would place a
+                    # second order for the same contract.
+                    try:
+                        o3 = client.get_order(order_id)
+                        if 'filled' in str(getattr(o3, 'status', '')).lower():
+                            fill_px = float(getattr(o3, 'filled_avg_price', 0) or limit_price)
+                            logger.info(f"[EXEC] Limit {symbol} actually FILLED (seen after blind cancel) @ ${fill_px:.2f} - no market fallback")
+                            return {"type": "limit", "price": fill_px, "mid": mid, "bid": bid, "improvement": (fill_px - bid if bid else 0)}
+                    except Exception as e3:
+                        logger.debug("[SWALLOWED] post-cancel fill re-check failed for %s: %r", symbol, e3)
             return _market_sell_and_confirm(client, symbol, bid, mid, "market_fallback_unfilled") | {"limit_attempt": limit_price}
         else:
             return _market_sell_and_confirm(client, symbol, bid, mid, "market")
