@@ -228,8 +228,8 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
         print(f"[FUND] All Alpha fetches failed - serving stale cache ({len(stale)} symbols, age {age_h:.1f}h); fundamentals screen degraded")
         logger.warning("[FUND] all Alpha overview fetches failed; using stale cache (%d symbols)", len(stale))
     elif fresh == 0 and not stale:
-        print("[FUND] WARNING: NO fundamentals data (all Alpha fetches failed, cache empty) - fundamentals screen INACTIVE this run; all symbols pass unscreened")
-        logger.warning("[FUND] no fundamentals data (fetch failed, cache empty); screen inactive this run")
+        print("[FUND] WARNING: NO fundamentals data (all Alpha fetches failed, cache empty) - screen FAIL-CLOSED this run; all symbols blocked from new positions")
+        logger.warning("[FUND] no fundamentals data (fetch failed, cache empty); screen fail-closed this run")
 
     # Never overwrite the cache when every fetch failed: the old file keeps its
     # old timestamp so the next run retries the APIs instead of TTL-blocking
@@ -250,7 +250,12 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
 def evaluate_fundamentals(symbol: str, fund_map: Dict[str, Dict], pe_max: float = 25.0, debt_eq_max: float = 0.7, mkt_cap_min: float = 1e9) -> Dict:
     sym = symbol.upper()
     if sym not in fund_map:
-        return {"blocked": False, "reason": "No fundamentals", "score_modifier": 1.0}
+        # Fail CLOSED (2026-09-10 audit): a quality screen must never treat
+        # "no data" as "quality OK". A symbol no source could evaluate is
+        # blocked from new positions until data appears.
+        return {"blocked": True,
+                "reason": "No fundamentals data - screen could not evaluate (fail-closed)",
+                "score_modifier": 1.0}
     f = fund_map[sym]
     reasons = []
     blocked = False
