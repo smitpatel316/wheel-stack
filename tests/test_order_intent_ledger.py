@@ -407,3 +407,17 @@ def test_reconcile_fallback_still_matches_anonymous_order(ledger):
     report = ledger.reconcile(lambda: orders)
     assert report["adopted"] == [intent.id]
     assert ledger.get(intent.id).broker_order_id == "o-anon"
+
+
+def test_reconcile_tolerates_naive_broker_timestamp(ledger):
+    """A broker order with an offset-less created_at must not raise
+    TypeError out of reconcile (treated as UTC)."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    naive = (datetime.now(timezone.utc)
+             - timedelta(minutes=2)).replace(tzinfo=None).isoformat()
+    orders = [{"id": "o-x", "ref_id": None, "state": "confirmed",
+               "quantity": "1", "created_at": naive,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)  # must not raise
+    assert report["adopted"] == [intent.id]

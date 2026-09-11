@@ -548,6 +548,11 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
             logger.debug("[SWALLOWED] broker order %s unparseable created_at %r",
                          o.get("id"), ts)
             continue
+        if o_created.tzinfo is None:
+            # The broker omitted the UTC offset. Normalize to UTC (the
+            # broker's API emits UTC) rather than letting a naive/aware
+            # subtraction raise TypeError and kill the whole reconcile.
+            o_created = o_created.replace(tzinfo=timezone.utc)
         if abs((o_created - created).total_seconds()) <= RECONCILE_WINDOW_S:
             cands.append(o)
     if len(cands) == 1:
