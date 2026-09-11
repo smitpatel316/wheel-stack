@@ -139,7 +139,10 @@ def test_reconcile_adopts_by_ref_id(ledger):
 def test_reconcile_fallback_side_qty_time(ledger):
     intent, _ = _begin(ledger)
     ledger.mark_unconfirmed(intent.id)
-    orders = [_broker_order(ref_id="something-else", oid="ord-x")]  # no ref_id field match
+    # Anonymous order (no ref_id): eligible for the side/qty/time fallback.
+    # An order carrying a DIFFERENT intent's ref_id is never adopted here
+    # (see test_reconcile_fallback_ignores_foreign_ref_id).
+    orders = [_broker_order(ref_id=None, oid="ord-x")]
     report = ledger.reconcile(lambda: orders)
     assert report["adopted"] == [intent.id]
     assert ledger.get(intent.id).broker_order_id == "ord-x"
@@ -373,3 +376,34 @@ def test_reconcile_without_run_id_skips_promotion(ledger):
     assert report == {"adopted": [], "needs_review": []}
     # SENDING untouched without a run_id to compare against.
     assert ledger.get(intent.id).state == "SENDING"
+
+
+# ------------------------------------------------- ref_id-authoritative fallback
+def test_reconcile_fallback_ignores_foreign_ref_id(ledger):
+    """The weak side/qty/time fallback must not adopt a broker order that
+    carries a DIFFERENT intent's ref_id (e.g. a same-sized AAPL order
+    adopted for an F intent would record the wrong fills)."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    created = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    orders = [{"id": "o-other", "ref_id": "someone-elses-ref-id",
+               "state": "confirmed", "quantity": "1", "created_at": created,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)
+    assert report == {"adopted": [], "needs_review": [intent.id]}
+    assert ledger.get(intent.id).broker_order_id is None
+    assert ledger.get(intent.id).state == "NEEDS_REVIEW"
+
+
+def test_reconcile_fallback_still_matches_anonymous_order(ledger):
+    """Anonymous orders (no ref_id at all) remain eligible for the
+    side/qty/time fallback."""
+    intent, _ = _begin(ledger)
+    ledger.mark_unconfirmed(intent.id)
+    created = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    orders = [{"id": "o-anon", "state": "confirmed", "quantity": "1",
+               "created_at": created,
+               "legs": [{"side": "sell", "position_effect": "open"}]}]
+    report = ledger.reconcile(lambda: orders)
+    assert report["adopted"] == [intent.id]
+    assert ledger.get(intent.id).broker_order_id == "o-anon"

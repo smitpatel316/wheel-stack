@@ -501,7 +501,11 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
     """Match an unconfirmed intent to a broker order.
 
     Returns the order dict, None (no match), or "AMBIGUOUS" (>1 match).
-    ref_id is authoritative when present; otherwise side+qty+time window.
+    ref_id is authoritative when present. The side+qty+time fallback only
+    matches orders with NO ref_id: an order stamped with a different
+    intent's ref_id belongs to that intent and is never adopted here.
+    Naive (offset-less) broker timestamps are treated as UTC rather than
+    crashing the reconcile.
     """
     by_ref = [o for o in orders
               if str(o.get("ref_id") or "") == intent.ref_id]
@@ -517,6 +521,12 @@ def _match_order(intent: Intent, orders: list) -> dict | None | str:
         return None
     cands = []
     for o in orders:
+        # ref_id is authoritative: an order stamped with a DIFFERENT
+        # intent's ref_id belongs to that intent and must never be adopted
+        # by the weak side/qty/time fallback below. (A matching ref_id was
+        # already consumed by the primary loop above.)
+        if str(o.get("ref_id") or "") and str(o.get("ref_id")) != intent.ref_id:
+            continue
         legs = o.get("legs") or []
         leg = legs[0] if legs else {}
         o_side = str(leg.get("side") or "").lower()
