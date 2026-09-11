@@ -145,6 +145,21 @@ def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=Non
 
 
 def main():
+    # Line-buffer stdout/stderr so a killed run leaves its TRUE last line in
+    # the log instead of a stale buffered one. 2026-09-11: two silent mid-run
+    # deaths left no traceback and no ENGINE-EXIT; block buffering meant the
+    # observed "last line" could lag the real death point by a whole buffer,
+    # making the deaths un-root-causeable. Line buffering costs nothing here
+    # (the run is already log-heavy) and makes the next silent death
+    # diagnosable. Wrapped defensively: buffering must never fail the run.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception as e:
+        # AST guard (tests/stress/test_no_silent_swallows.py) requires a log
+        # call in every handler; _hist_log has no handlers yet this early, so
+        # this falls back to logging's last-resort stderr output.
+        _hist_log.warning("[SWALLOWED] stdout/stderr line-buffering reconfigure failed: %r", e)
     args = parse_args()
     strat_logger = StrategyLogger(enabled=args.strat_log)
     logger = setup_logger(level=args.log_level, to_file=args.log_to_file)

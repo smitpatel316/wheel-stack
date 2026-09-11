@@ -9,6 +9,7 @@ on a clean run (the cron only relays output when there is something to say).
 Usage: monitor_fix_regressions.py <morning|midday|afternoon>
 """
 import glob
+import logging
 import os
 import re
 import sqlite3
@@ -18,6 +19,8 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(REPO, "logs")
 LEDGER_DB = os.environ.get("ORDER_INTENT_DB") or os.path.join(REPO, "state", "order_intents.db")
+
+_log = logging.getLogger("fix_monitor")
 
 
 def latest_log(slot: str):
@@ -80,6 +83,7 @@ def main():
             for row in stuck:
                 findings.append(f"ledger has {row['c']} intent(s) stuck in {row['state']}")
         except Exception as e:
+            _log.warning("[SWALLOWED] could not read order-intent ledger: %r", e)
             findings.append(f"could not read order-intent ledger: {e!r}")
 
     if findings:
