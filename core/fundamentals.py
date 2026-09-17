@@ -147,6 +147,23 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                     if entry:
                         stale[sym] = entry
                         re_primary += 1
+                if re_primary:
+                    # Persist the refresh: without this the weakened fallback
+                    # entry stays on disk, every run re-fetches primary (slow,
+                    # burns Alpha rate limit), and a run killed mid-flight
+                    # (e.g. 2026-09-17 12:05 container replacement) leaves the
+                    # next run screening on understated leverage data.
+                    # Keep the ORIGINAL _timestamp: the other entries are still
+                    # that old, so the 24h TTL must not be extended by this.
+                    try:
+                        LOG_DIR.mkdir(exist_ok=True)
+                        CACHE_FILE.write_text(json.dumps({
+                            "_timestamp": ts,
+                            "fundamentals": list(stale.values())
+                        }, indent=2))
+                    except Exception as e:
+                        logger.debug("[SWALLOWED] persisting refreshed fundamentals cache %s: %r",
+                                     CACHE_FILE, e)
                 still_fb = sorted(s for s, e in stale.items() if e.get("source") == "finnhub_metric")
                 cache.update(stale)
                 if cache:
