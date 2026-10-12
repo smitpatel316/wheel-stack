@@ -85,15 +85,24 @@ def _optionable_account_id() -> int:
         pass
     return 1
 
-def _existing_fund_txns() -> List[Dict]:
+def _existing_fund_txns():
+    """Existing fund transactions, or None when the read FAILED.
+
+    None is load-bearing: an unreadable dedupe set is not an empty one.
+    The old code returned [] on any failure, so a transient Pi flap
+    during this GET (while POSTs still succeeded) re-created every
+    recent dividend/interest/fee record as a dashboard duplicate -
+    a write path with no outbox and no self-heal. Callers must skip
+    the sync when this returns None (next run retries cleanly).
+    """
     try:
         r = requests.get(f"{OPTIONABLE_URL}/api/fund-transactions", timeout=TIMEOUT)
         if r.status_code == 200:
             return r.json().get('data') or []
+        logger.warning("[SWALLOWED] Optionable /api/fund-transactions HTTP %s, dedupe read failed", r.status_code)
     except Exception as e:
-        logger.warning("[SWALLOWED] Optionable /api/fund-transactions read failed, dedupe set empty: %r", e)
-        pass
-    return []
+        logger.warning("[SWALLOWED] Optionable /api/fund-transactions read failed, dedupe unavailable: %r", e)
+    return None
 
 def sync_dividends_and_interest(client):
     """Sync DIV, INT, DIVNRA etc -> fund_transactions dividend/interest"""
@@ -111,6 +120,10 @@ def sync_dividends_and_interest(client):
 
     account_id = _optionable_account_id()
     existing = _existing_fund_txns()
+    if existing is None:
+        logger.warning("Optionable fund-transaction dedupe read failed - skipping "
+                       "dividend/interest sync this run rather than risk duplicate records")
+        return
     # Build set of existing descriptions to dedupe
     existing_desc = set((t.get('amount'), t.get('date'), t.get('description','')[:30]) for t in existing)
 

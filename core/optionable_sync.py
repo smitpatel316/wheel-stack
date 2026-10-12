@@ -73,6 +73,25 @@ def alive() -> bool:
         logger.debug(f"Optionable not reachable {OPTIONABLE_URL}: {e}")
         return False
 
+
+def alive_retry(attempts: int = 3, retry_delay: float = 1.0) -> bool:
+    """alive() with retries, for run-level gates and end-of-run syncs.
+
+    2026-10-01 midday proved a single transient flap at the gate loses
+    a whole run's reconciliation sync even though the dashboard answers
+    seconds later (the same run's [DASH] push succeeded). A separate
+    function (not a parameter on alive) keeps alive's signature stable
+    for the many callers/tests that patch it as a zero-arg callable.
+    Cost when the Pi is truly down is bounded: attempts x TIMEOUT, once
+    per sync - never on the per-trade push path.
+    """
+    for attempt in range(max(1, attempts)):
+        if alive():
+            return True
+        if attempt + 1 < max(1, attempts):
+            time.sleep(retry_delay)
+    return False
+
 def _parse_occ(occ_symbol: str) -> Optional[Tuple[str, str, str, float, str]]:
     m = re.match(r'^([A-Z]+)(\d{6})([PC])(\d{8})$', occ_symbol.strip())
     if not m:
@@ -317,7 +336,29 @@ def push_trade_to_optionable(
     # Durable FIRST: even a crash between fill and push loses nothing.
     # The outbox drain does the same dup check the old inline code did
     # (syncId in notes, or ticker/strike/expiry/type tuple match) before POSTing.
-    enqueue_trade(payload, sync_id)
+    queued_path = enqueue_trade(payload, sync_id)
+    if queued_path is None:
+        # Outbox write failed (disk full / torn state dir): the payload is
+        # NOT durable, so the old fall-through was a silent loss - drain
+        # found nothing, is_queued() was False, and the caller logged
+        # "Optionable: logged ..." for a trade that never reached the
+        # dashboard and was never queued. Last resort: one direct delivery
+        # attempt. If that also fails, return False loudly; the fill is
+        # still in the engine journal + Alpaca (canonical), and
+        # postrun_verify flags the OUTBOX WRITE FAILED line.
+        logger.error(f"[SYNC] OUTBOX WRITE FAILED - {trade_type} {underlying} ${strike} {exp_date} "
+                     f"is NOT queued (id {sync_id[:8]}); attempting direct delivery")
+        try:
+            r = requests.post(f"{OPTIONABLE_URL}/api/trades", json=payload, timeout=TIMEOUT)
+            if r.status_code in (200, 201):
+                logger.warning(f"[SYNC] direct delivery succeeded for {trade_type} {underlying} "
+                               f"${strike} {exp_date} despite outbox write failure (id {sync_id[:8]})")
+                logger.info(f"Optionable: logged {trade_type} {underlying} ${strike} exp {exp_date} ${bid_per_share:.2f}x{contracts} comm ${comm:.2f}")
+                return True
+        except Exception as e:
+            logger.error(f"[SYNC] direct delivery after outbox write failure also failed for "
+                         f"{trade_type} {underlying} ${strike} {exp_date}: {type(e).__name__}")
+        return False
 
     if not alive():
         logger.warning(
@@ -337,7 +378,7 @@ def sync_alpaca_equity_to_optionable(client):
     """Sync equity longs (excluding treasuries) as manual stocks - idempotent"""
     if not _require_alpaca_client(client):
         return
-    if not alive():
+    if not alive_retry(attempts=2):
         return
     try:
         account_id = get_default_account_id()
@@ -435,7 +476,7 @@ def sync_sgov_to_optionable(client):
     """SGOV idle cash -> track as stock"""
     if not _require_alpaca_client(client):
         return
-    if not alive():
+    if not alive_retry(attempts=2):
         return
     try:
         account_id = get_default_account_id()
@@ -543,7 +584,7 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
     """
     if not _require_alpaca_client(client):
         return
-    if not alive():
+    if not alive_retry(attempts=2):
         return
     try:
         account_id = get_default_account_id()
@@ -763,7 +804,7 @@ def sync_realized_pnl_from_alpaca(client) -> Dict:
     summary = {"realized": 0.0, "fees": 0.0, "optionable_pnl": 0.0, "discrepancy": 0.0, "corrected": 0, "entries": []}
     if not _require_alpaca_client(client):
         return summary
-    if not alive():
+    if not alive_retry(attempts=2):
         logger.debug("Optionable not alive, skip realized P/L sync")
         return summary
     try:
@@ -936,7 +977,7 @@ def reconcile_open_entry_prices(client) -> int:
     """
     if not _require_alpaca_client(client):
         return 0
-    if not alive():
+    if not alive_retry(attempts=2):
         return 0
     patched = 0
     try:

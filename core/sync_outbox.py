@@ -174,6 +174,14 @@ def _trade_already_recorded(trades, payload: dict, sync_id: str) -> bool:
             # a genuinely new position on the same contract (re-open after close).
             if str(t.get("status") or "").lower() != "open":
                 continue
+            # A receiver trade opened on a DIFFERENT date is a different
+            # fill (e.g. a contract profit-closed in the morning and
+            # re-sold the same day, or a second lot of the same OCC):
+            # the tuple alone must not suppress its delivery. Legacy
+            # receiver rows without an openedDate keep the old behaviour.
+            recv_opened = t.get("openedDate") or t.get("opened_date")
+            if recv_opened and payload.get("openedDate") and str(recv_opened) != str(payload.get("openedDate")):
+                continue
             if (t.get("ticker") == payload.get("ticker")
                     and t.get("type") == payload.get("type")
                     and t.get("expirationDate") == payload.get("expirationDate")

@@ -135,8 +135,16 @@ def _fetch_optionable_health():
             req = urllib.request.Request(base + "/api/health", headers={"User-Agent": "curl/8.5.0"})
             with urllib.request.urlopen(req, timeout=8) as r:
                 d = json.load(r).get("data", {})
-            return d.get("status") == "healthy", \
-                f"healthy v{d.get('version')} {d.get('database', {}).get('tradeCount')} trades"
+            tc = d.get("database", {}).get("tradeCount")
+            if d.get("status") != "healthy":
+                return False, f"status {d.get('status')!r} (not healthy)"
+            if not isinstance(tc, int) or isinstance(tc, bool):
+                # A "healthy" payload with no usable tradeCount is a
+                # stale/partial health response, not proof the Pi API is
+                # serving the real database - the old code printed
+                # "healthy vX None trades" and PASSed it.
+                return False, f"healthy v{d.get('version')} but tradeCount missing/invalid ({tc!r})"
+            return True, f"healthy v{d.get('version')} {tc} trades"
         except Exception as e:
             last_err = f"{type(e).__name__} (attempt {attempt}/3)"
             logger.debug("[SWALLOWED] optionable-api attempt %d: %s", attempt, type(e).__name__)
@@ -216,10 +224,56 @@ def main():
     # 6. Outbox drained empty by run end - use the ENGINE's outbox location
     # (core.sync_outbox.outbox_dir, honors SYNC_OUTBOX_DIR), not a hardcoded
     # path; otherwise this check can disagree with the optionable-sync check.
+    # Quarantined *.bad items count as NOT empty: drain_outbox renames a
+    # corrupt payload to .bad and never delivers it - counting only *.json
+    # reported "empty" while a trade record had been lost.
     outbox = _outbox_dir()
-    pending = len([f for f in os.listdir(outbox) if f.endswith(".json")]) if os.path.isdir(outbox) else 0
-    check("outbox-empty", pending == 0, f"{pending} payload(s) retained for next run"
-          if pending else "empty")
+    _ob_files = os.listdir(outbox) if os.path.isdir(outbox) else []
+    pending = len([f for f in _ob_files if f.endswith(".json")])
+    bad = len([f for f in _ob_files if f.endswith(".bad")])
+    _max_attempts = 0
+    for _f in _ob_files:
+        if _f.endswith(".json"):
+            try:
+                _max_attempts = max(_max_attempts, int(json.load(open(os.path.join(outbox, _f))).get("attempts") or 0))
+            except Exception as e:
+                logger.debug("[SWALLOWED] outbox attempts read for %s failed: %r", _f, e)
+    _ob_detail = []
+    if pending:
+        _ob_detail.append(f"{pending} payload(s) retained for next run")
+        if _max_attempts:
+            _ob_detail.append(f"max attempts on a queued item: {_max_attempts}")
+    if bad:
+        _ob_detail.append(f"{bad} quarantined .bad payload(s) LOST (corrupt, never delivered)")
+    check("outbox-empty", pending == 0 and bad == 0,
+          "; ".join(_ob_detail) if _ob_detail else "empty")
+
+    # 6b. Sync integrity: an outbox WRITE failure means a trade payload was
+    # never made durable. push_trade_to_optionable used to fall through
+    # from this to a false "Optionable: logged" success, and nothing in
+    # this verifier looked for the line at all.
+    if "OUTBOX WRITE FAILED" in text:
+        _m = re.search(r"^.*OUTBOX WRITE FAILED.*$", text, re.M)
+        check("sync-integrity", False, (_m.group(0) if _m else "OUTBOX WRITE FAILED")[:140])
+    else:
+        check("sync-integrity", True, "no outbox write failures")
+
+    # 6c. Swallowed phase failures: run_strategy wraps every phase
+    # (earnings/dividend/fundamentals/vol/liquidity/context/closer/
+    # roller/end-of-run sync) in try/except + logger.warning, so a run
+    # can exit 0 with NO traceback while entire phases silently did
+    # nothing. Checks 1-2 cannot see that; scan for the phase-failure
+    # lines themselves. Verified absent from every ENGINE-EXIT=0 log in
+    # Sep-Oct 2026, so this does not false-positive healthy runs.
+    _PHASE_FAIL = re.compile(
+        r"\[EARNINGS\] Failed:|\[DIVIDEND\] Failed:|\[FUND\] Failed:|\[VOL\] Failed:"
+        r"|\[LIQ\] Failed:|Context analyzer failed|Closer eval failed"
+        r"|Roll evaluation failed|earnings-source pull failed"
+        r"|Optionable sync failed:|Strategy logger save failed")
+    _pf = _PHASE_FAIL.search(text)
+    check("phase-failures", _pf is None,
+          "all phases completed" if _pf is None
+          else f"swallowed phase failure: {text[_pf.start():text.find(chr(10), _pf.start())][:140]}")
 
     # 7. Optionable (Pi) API sanity — transient drops get retried
     ok, detail = _fetch_optionable_health()

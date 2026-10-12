@@ -120,6 +120,13 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
     fallback_used = 0
     # Only fetch for few symbols per run due to rate limit (TIME_SERIES_DAILY is heavy)
     for sym in symbols[:8]:
+        # Pre-fetch marker: the post-fetch print below only fires on
+        # success, so without this line a process dying inside one
+        # symbol's Alpha/Alpaca fetch is indistinguishable from it
+        # dying in the previous symbol's compute/sleep (the Oct 7 + 8
+        # silent deaths both stopped in this loop). This narrows the
+        # next death to one named symbol + one named fetch.
+        print(f"[VOL] fetching {sym.upper()} ...")
         closes = fetch_daily_alpha(sym)
         source = "alpha_daily"
         if not closes:
