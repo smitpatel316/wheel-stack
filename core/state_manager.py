@@ -17,13 +17,14 @@ MAX_ROLLS_PER_LINEAGE = 2
 ROLL_COUNTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "roll_counts.json")
 
 
-def _quarantine_corrupt_roll_counts(path, err):
-    """Preserve a bad roll-counts file for forensics and reset LOUDLY.
+def _backup_corrupt_roll_counts(path):
+    """Move a bad roll-counts file aside for forensics; return its new path.
 
     2026-09-09: never silently discard the roll cap. A corrupt file means a
     previous write died mid-dump; a quiet {} reset here lets an
     already-twice-rolled position roll again, compounding losses the cap
-    exists to prevent (mirrors the d045074 strategy_log.json fix).
+    exists to prevent (mirrors the d045074 strategy_log.json fix). Callers
+    log the reset loudly at ERROR.
     """
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     corrupt_backup = f"{path}.corrupt-{ts}UTC"
@@ -31,10 +32,8 @@ def _quarantine_corrupt_roll_counts(path, err):
         os.replace(path, corrupt_backup)
     except Exception as be:
         log.error("[SWALLOWED] roll-count backup of corrupt %s failed: %r", path, be)
-    log.error("[SWALLOWED] roll counts %s unreadable (%r) - moved to %s, "
-              "cap reset to {} (was: risk control weakened, investigate)",
-              path, err, corrupt_backup)
-    return {}
+        return None
+    return corrupt_backup
 
 
 def _sanitize_roll_counts(raw, path):
@@ -51,8 +50,11 @@ def _sanitize_roll_counts(raw, path):
     MAX_ROLLS_PER_LINEAGE so the cap fails CLOSED, never open.
     """
     if not isinstance(raw, dict):
-        return _quarantine_corrupt_roll_counts(
-            path, TypeError(f"roll counts must be a JSON object, got {type(raw).__name__}"))
+        backup = _backup_corrupt_roll_counts(path)
+        log.error("[SWALLOWED] roll counts %s must be a JSON object, got %s - moved to %s, "
+                  "cap reset to {} (was: risk control weakened, investigate)",
+                  path, type(raw).__name__, backup)
+        return {}
     clean = {}
     for key, value in raw.items():
         parts = str(key).split(":")
@@ -81,7 +83,11 @@ def load_roll_counts(path=ROLL_COUNTS_PATH):
         log.debug("[SWALLOWED] no roll-count file at %s yet (first run)", path)
         return {}
     except Exception as e:
-        return _quarantine_corrupt_roll_counts(path, e)
+        backup = _backup_corrupt_roll_counts(path)
+        log.error("[SWALLOWED] roll counts %s unreadable (%r) - moved to %s, "
+                  "cap reset to {} (was: risk control weakened, investigate)",
+                  path, e, backup)
+        return {}
     return _sanitize_roll_counts(raw, path)
 
 
