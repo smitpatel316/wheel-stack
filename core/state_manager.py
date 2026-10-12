@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 from datetime import datetime, timezone
@@ -16,38 +17,95 @@ MAX_ROLLS_PER_LINEAGE = 2
 ROLL_COUNTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "roll_counts.json")
 
 
+def _quarantine_corrupt_roll_counts(path, err):
+    """Preserve a bad roll-counts file for forensics and reset LOUDLY.
+
+    2026-09-09: never silently discard the roll cap. A corrupt file means a
+    previous write died mid-dump; a quiet {} reset here lets an
+    already-twice-rolled position roll again, compounding losses the cap
+    exists to prevent (mirrors the d045074 strategy_log.json fix).
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    corrupt_backup = f"{path}.corrupt-{ts}UTC"
+    try:
+        os.replace(path, corrupt_backup)
+    except Exception as be:
+        log.error("[SWALLOWED] roll-count backup of corrupt %s failed: %r", path, be)
+    log.error("[SWALLOWED] roll counts %s unreadable (%r) - moved to %s, "
+              "cap reset to {} (was: risk control weakened, investigate)",
+              path, err, corrupt_backup)
+    return {}
+
+
+def _sanitize_roll_counts(raw, path):
+    """Fail-closed cleanup of a parsed-but-wrong-shaped roll-counts file.
+
+    Valid JSON with the wrong shape used to sail past the corrupt-file
+    handler in load_roll_counts(): a top-level list crashed
+    prune_roll_counts (.items) and killed the whole roll phase for the run;
+    a string count crashed the `n >= MAX_ROLLS_PER_LINEAGE` check the same
+    way; a negative count silently weakened the cap (it takes
+    MAX - value + 1 increments to reach the cap). Sanitize per entry:
+    malformed keys (can never match a real "SYM:P"/"SYM:C" lineage lookup)
+    are dropped loudly; malformed or out-of-range values clamp to
+    MAX_ROLLS_PER_LINEAGE so the cap fails CLOSED, never open.
+    """
+    if not isinstance(raw, dict):
+        return _quarantine_corrupt_roll_counts(
+            path, TypeError(f"roll counts must be a JSON object, got {type(raw).__name__}"))
+    clean = {}
+    for key, value in raw.items():
+        parts = str(key).split(":")
+        if len(parts) != 2 or not parts[0].isalpha() or parts[1] not in ("P", "C"):
+            log.error("[SWALLOWED] roll counts %s: dropping malformed lineage key %r "
+                      "(expected 'SYM:P'/'SYM:C')", path, key)
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or (isinstance(value, float) and not math.isfinite(value)) \
+                or value != int(value) or not 0 <= value <= MAX_ROLLS_PER_LINEAGE:
+            log.error("[SWALLOWED] roll counts %s: lineage %s has invalid count %r - "
+                      "clamping to cap %d (fail-closed; investigate)",
+                      path, key, value, MAX_ROLLS_PER_LINEAGE)
+            clean[key] = MAX_ROLLS_PER_LINEAGE
+        else:
+            clean[key] = int(value)
+    return clean
+
+
 def load_roll_counts(path=ROLL_COUNTS_PATH):
     try:
         with open(path) as f:
-            return json.load(f)
+            raw = json.load(f)
     except FileNotFoundError:
         # swallow:intentional - first run before any roll has happened
         log.debug("[SWALLOWED] no roll-count file at %s yet (first run)", path)
         return {}
     except Exception as e:
-        # 2026-09-09: never silently discard the roll cap. A corrupt file
-        # means a previous write died mid-dump; preserve the bytes for
-        # forensics and reset LOUDLY (mirrors the d045074 strategy_log.json
-        # fix - a quiet {} reset here lets an already-twice-rolled position
-        # roll again, compounding losses the cap exists to prevent).
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        corrupt_backup = f"{path}.corrupt-{ts}UTC"
-        try:
-            os.replace(path, corrupt_backup)
-        except Exception as be:
-            log.error("[SWALLOWED] roll-count backup of corrupt %s failed: %r", path, be)
-        log.error("[SWALLOWED] roll counts %s unreadable (%r) - moved to %s, "
-                  "cap reset to {} (was: risk control weakened, investigate)",
-                  path, e, corrupt_backup)
-        return {}
+        return _quarantine_corrupt_roll_counts(path, e)
+    return _sanitize_roll_counts(raw, path)
 
 
 def save_roll_counts(counts, path=ROLL_COUNTS_PATH):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    # Per-PID tmp name: two overlapping runs (cron + retry) sharing one
+    # ".tmp" path could interleave writes and replace a torn file into
+    # place - the exact mid-write corruption load_roll_counts guards
+    # against. fsync before/after the rename so a VM crash cannot lose a
+    # committed increment or resurrect a half-flushed tmp as the file.
+    tmp = f"{path}.tmp-{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(counts, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+    try:
+        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        log.debug("[SWALLOWED] roll-count dir fsync failed for %s (rename already committed): %r", path, e)
 
 
 def prune_roll_counts(counts, states):
