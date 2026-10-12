@@ -87,6 +87,24 @@ def _spread_pct(bid, ask):
         return 999
     return (ask-bid)/mid
 
+def _is_filled_status(status) -> bool:
+    """True only for a FULL fill, whatever shape the broker returns.
+
+    Alpaca's SDK status is an enum whose str() is "OrderStatus.FILLED"
+    (every roll close in the Sep-Oct 2026 run logs reads
+    "Close status orderstatus.filled"), while the Robinhood adapter and
+    test fakes return the plain string "filled". Comparing the raw string
+    to "filled" therefore never matches on the Alpaca path: the close
+    poll burned its full 45s and the open poll its full 30s on every roll
+    (11/11 roll opens in the logs "not confirmed filled within 30s", 0
+    "Open FILLED" ever), so the open leg was always pushed to the
+    dashboard at the scan-time bid estimate and only corrected later by
+    reconcile_open_entry_prices(). Normalize by taking the token after
+    the last "." and requiring an exact "filled" -- "partially_filled"
+    is NOT a full fill and must keep polling.
+    """
+    return str(status or "").strip().lower().rsplit(".", 1)[-1] == "filled"
+
 def evaluate_roll_need(candidate: RollCandidate, config: Dict = None) -> RollDecision:
     cfg = config or {}
     otm_threshold = cfg.get("rolling_otm", 0.03)
@@ -495,10 +513,10 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
             except Exception as e:
                 log.warning("[SWALLOWED] close fill/BP poll failed for %s (order %s): %r", candidate.symbol, close_id, e)
                 continue
-            if close_status == 'filled' and opened_bp >= required_bp:
+            if _is_filled_status(close_status) and opened_bp >= required_bp:
                 break
         log.info(f"[ROLL] Close status {close_status}, options BP ${opened_bp:,.0f} vs required ~${required_bp:,.0f} - proceeding with open leg")
-        if close_status == 'filled' and opened_bp < required_bp:
+        if _is_filled_status(close_status) and opened_bp < required_bp:
             log.warning(
                 f"[ROLL] BP still short after 45s wait for {candidate.symbol} "
                 f"(${opened_bp:,.0f} < ${required_bp:,.0f}) - attempting open anyway; "
@@ -528,7 +546,7 @@ def roll_position(client, candidate: RollCandidate, target: RollTarget, logger_o
                 time.sleep(2.0)
                 try:
                     oo = client.trade_client.get_order_by_id(open_id)
-                    if str(getattr(oo, 'status', '')).lower() == 'filled':
+                    if _is_filled_status(getattr(oo, 'status', '')):
                         open_fill_px = getattr(oo, 'filled_avg_price', None)
                         break
                 except Exception as e:
