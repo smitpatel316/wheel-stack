@@ -686,22 +686,27 @@ def main():
             # position that actually gets assigned.
             urgency_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
             need_roll.sort(key=lambda d: (urgency_rank.get(d.urgency, 3), d.candidate.dte if d.candidate.dte is not None else 999))
+            # v2.6: cap defensive rolls per position lineage, then let it ride.
+            # Load/prune runs even when nothing needs rolling: prune used to
+            # live inside `if need_roll:` only, so a lineage that ended during
+            # a quiet stretch stayed in state/roll_counts.json - and if a
+            # fresh position in the same symbol opened before the next
+            # need_roll run, the stale count attached to the NEW lineage.
+            loaded_roll_counts = load_roll_counts()
+            roll_counts = prune_roll_counts(loaded_roll_counts, states)
+            if roll_counts != loaded_roll_counts:
+                # Pruning was in-memory only until 2026-08-21 — dead
+                # lineages (BAC:P, KO:P) lived in state/roll_counts.json
+                # forever. Persist the prune.
+                save_roll_counts(roll_counts)
+            if roll_counts:
+                logger.info(f"[ROLLER] Roll counts: {', '.join(f'{k} {v}/{MAX_ROLLS_PER_LINEAGE}' for k, v in sorted(roll_counts.items()))}")
             if need_roll:
                 logger.info(f"[ROLLER] {len(need_roll)} need rolling:")
                 for d in need_roll:
                     logger.info(f"  - {d.candidate.symbol} {d.roll_type} urgency {d.urgency} OTM {d.decision_factors.get('otm_pct',0):.1%} ITM {d.candidate.itm_pct:.1%} DTE {d.candidate.dte}: {d.reasons}")
                 if not is_market_open:
                     logger.info(f"[ROLLER] Market closed - deferring {len(need_roll)} rolls to next open session")
-                # v2.6: cap defensive rolls per position lineage, then let it ride
-                loaded_roll_counts = load_roll_counts()
-                roll_counts = prune_roll_counts(loaded_roll_counts, states)
-                if roll_counts != loaded_roll_counts:
-                    # Pruning was in-memory only until 2026-08-21 — dead
-                    # lineages (BAC:P, KO:P) lived in state/roll_counts.json
-                    # forever. Persist the prune.
-                    save_roll_counts(roll_counts)
-                if roll_counts:
-                    logger.info(f"[ROLLER] Roll counts: {', '.join(f'{k} {v}/{MAX_ROLLS_PER_LINEAGE}' for k, v in sorted(roll_counts.items()))}")
                 capped = []
                 for d in need_roll:
                     lineage = f"{d.candidate.underlying}:{'P' if d.candidate.is_put else 'C'}"
