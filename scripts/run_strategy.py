@@ -6,7 +6,7 @@ from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
 from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
 from app_logging.strategy_logger import StrategyLogger
 from app_logging.logger_setup import setup_logger
-from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, sync_closed_trades, reconcile_open_entry_prices
+from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, alive_retry as optionable_alive_retry, sync_closed_trades, reconcile_open_entry_prices
 from core.cli_args import parse_args
 from core.activities_sync import sync_dividends_and_interest, sync_option_events
 from core.context_analyzer import analyze_context, adapt_params, save_context_log
@@ -144,7 +144,42 @@ def sync_sgov_real(client, logger, risk_override=None, equity=None, risk_cap=Non
                     enabled=SGOV_ENABLED)
 
 
+def _install_death_markers():
+    """Leave evidence when the process is killed by a signal.
+
+    The silent mid-run deaths (2026-09-10/11, recurrences 2026-10-07
+    morning + 2026-10-08 afternoon, both stopping mid-[VOL]) produced
+    no traceback and no ENGINE-EXIT: a SIGKILL/OOM/container-replacement
+    cannot be caught, but a SIGTERM/SIGINT/SIGHUP (session reap,
+    supervisor stop, container stop with a grace period) CAN - log it
+    with a wall-clock timestamp before exiting with the conventional
+    128+signum code. If the next death log ends with a [DEATH] line we
+    learn it was a graceful kill; if it still ends mid-phase with no
+    [DEATH] line, the kill was SIGKILL-class / whole-container, which
+    no in-process code can record - that distinction is the diagnosis.
+    """
+    import signal as _signal
+
+    def _handler(signum, frame):
+        try:
+            msg = (f"[DEATH] received signal {signum} "
+                   f"({_signal.Signals(signum).name}) at "
+                   f"{datetime.now(timezone.utc).isoformat()} - run aborting; "
+                   f"last phase is the log line above this one")
+            _hist_log.error(msg)
+            print(msg, file=sys.stderr, flush=True)
+        finally:
+            raise SystemExit(128 + signum)
+
+    for _sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+        try:
+            _signal.signal(_sig, _handler)
+        except Exception as e:
+            _hist_log.warning("[SWALLOWED] death-marker install for signal %s failed: %r", _sig, e)
+
+
 def main():
+    _install_death_markers()
     # Line-buffer stdout/stderr so a killed run leaves its TRUE last line in
     # the log instead of a stale buffered one. 2026-09-11: two silent mid-run
     # deaths left no traceback and no ENGINE-EXIT; block buffering meant the
@@ -179,7 +214,7 @@ def main():
         from core.sync_outbox import drain_outbox as _drain_outbox, outbox_pending as _outbox_pending
         _pending = _outbox_pending()
         if _pending:
-            if optionable_alive():
+            if optionable_alive_retry(attempts=3):
                 _drain_outbox()
             else:
                 logger.warning(f"[SYNC] {_pending} Optionable payload(s) held in local outbox, "
@@ -843,7 +878,7 @@ def main():
     else:
         logger.info("[SGOV] Sweep disabled (SGOV_ENABLED=False) - cash stays in the broker's own sweep (Robinhood/Fidelity model)")
 
-    if optionable_alive():
+    if optionable_alive_retry(attempts=3):
         try:
             if _broker_name == "robinhood":
                 # Alpaca-activities-based syncs (closed trades, entry prices,
