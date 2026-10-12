@@ -260,7 +260,9 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
         }
         try:
             LOG_DIR.mkdir(exist_ok=True)
-            CACHE_FILE.write_text(json.dumps(cache_doc, indent=2))
+            _ctmp = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+            _ctmp.write_text(json.dumps(cache_doc, indent=2))
+            os.replace(_ctmp, CACHE_FILE)
         except Exception as e:
             logger.debug("[SWALLOWED] writing earnings cache %s: %r", CACHE_FILE, e)
             print(f"[EARNINGS] Cache write failed: {e}")

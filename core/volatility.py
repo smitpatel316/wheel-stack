@@ -167,10 +167,12 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
     if fresh > 0:
         try:
             LOG_DIR.mkdir(exist_ok=True)
-            CACHE_FILE.write_text(json.dumps({
+            _tmp = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+            _tmp.write_text(json.dumps({
                 "_timestamp": time.time(),
                 "volatility": list(vol_map.values())
             }, indent=2))
+            os.replace(_tmp, CACHE_FILE)
         except Exception as e:
             log.debug("[SWALLOWED] volatility cache write failed: %r", e)
             pass

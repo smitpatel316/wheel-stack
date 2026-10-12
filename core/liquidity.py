@@ -87,12 +87,22 @@ def evaluate_liquidity(symbol: str, current_volume: int = None, current_oi: int 
                     try:
                         raw = json.loads(CACHE_FILE.read_text())
                     except Exception as e:
-                        logger.debug("[SWALLOWED] reading liquidity cache %s before update, starting fresh: %r", CACHE_FILE, e)
+                        # Quarantine the corrupt file instead of silently
+                        # overwriting every other symbol's history with a
+                        # one-symbol file (partial-write corruption class).
+                        logger.warning("[LIQ] liquidity cache %s unparseable (%r) - quarantining before rewrite", CACHE_FILE, e)
+                        try:
+                            os.replace(CACHE_FILE, CACHE_FILE.with_suffix(
+                                CACHE_FILE.suffix + f".corrupt-{int(time.time())}"))
+                        except Exception as qe:
+                            logger.debug("[SWALLOWED] quarantining corrupt liquidity cache %s: %r", CACHE_FILE, qe)
                         raw = {}
                 if "vol_history" not in raw:
                     raw["vol_history"] = {}
                 raw["vol_history"][sym] = {"vols": vols, "_ts": time.time()}
-                CACHE_FILE.write_text(json.dumps(raw))
+                _tmp = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+                _tmp.write_text(json.dumps(raw))
+                os.replace(_tmp, CACHE_FILE)
             except Exception as e:
                 logger.debug("[SWALLOWED] writing liquidity cache %s for %s: %r", CACHE_FILE, sym, e)
                 pass
