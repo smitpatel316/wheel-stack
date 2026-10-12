@@ -204,8 +204,18 @@ def sync_sgov_float(client, log=None, equity=None, risk_cap=None, *,
             _q.save()
             queue_need_pending = _q.pending_need()
             prefund_pending_qty = _q.pending_prefund_qty()
+            if _q.broken:
+                # A corrupt queue file loads as EMPTY (pending need $0), so
+                # the buy protection below silently turns off. That must be
+                # visible at cron-log level (WARNING), not discoverable only
+                # in the state file (swarm sgov-risk hunt, 2026-10-12).
+                log.warning("[SGOV FLOAT] funding queue file corrupt/broken - "
+                            "queue buy-protection unavailable this run "
+                            "(pending need treated as $0)")
         except Exception as _qe:
-            log.debug(f"[SGOV FLOAT] funding-queue check failed: {_qe}")
+            # Was log.debug: invisible in INFO-level cron logs, so a failed
+            # queue check looked identical to a healthy empty queue.
+            log.warning(f"[SGOV FLOAT] funding-queue check failed: {_qe}")
 
         # Pending broker orders (belt under the ledger suspenders).
         # Fail closed: an unreadable order list must never read as zero
