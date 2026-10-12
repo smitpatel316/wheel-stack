@@ -25,6 +25,14 @@ def get_alpha_key():
         logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
+def _atomic_write_cache(text: str):
+    """Write CACHE_FILE via tmp+rename so a run killed mid-write (container
+    replacements are routine here) can never leave a truncated cache behind."""
+    tmp = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, CACHE_FILE)
+
+
 def _redact(err: Exception, key: str) -> str:
     """repr(err) with the API key scrubbed (requests exceptions embed the full URL)."""
     s = repr(err)
@@ -157,9 +165,25 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                     # that old, so the 24h TTL must not be extended by this.
                     try:
                         LOG_DIR.mkdir(exist_ok=True)
-                        CACHE_FILE.write_text(json.dumps({
+                        # Merge into the FULL on-disk list: writing only
+                        # stale.values() would silently drop every cached
+                        # symbol outside this run's request list (same
+                        # partial-write class as the bug fixed above).
+                        merged = []
+                        seen = set()
+                        for entry in raw.get("fundamentals", []):
+                            sym = entry.get("symbol", "").upper()
+                            if sym in stale:
+                                merged.append(stale[sym])
+                            else:
+                                merged.append(entry)
+                            seen.add(sym)
+                        for sym, entry in stale.items():
+                            if sym not in seen:
+                                merged.append(entry)
+                        _atomic_write_cache(json.dumps({
                             "_timestamp": ts,
-                            "fundamentals": list(stale.values())
+                            "fundamentals": merged
                         }, indent=2))
                     except Exception as e:
                         logger.debug("[SWALLOWED] persisting refreshed fundamentals cache %s: %r",
@@ -254,7 +278,7 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
     if fresh > 0:
         try:
             LOG_DIR.mkdir(exist_ok=True)
-            CACHE_FILE.write_text(json.dumps({
+            _atomic_write_cache(json.dumps({
                 "_timestamp": time.time(),
                 "fundamentals": list(overview_map.values())
             }, indent=2))

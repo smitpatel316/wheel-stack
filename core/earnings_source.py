@@ -99,6 +99,16 @@ def sync_from_source(cache_file: Optional[Path] = None, state_file: Optional[Pat
     if remote_ts <= 0:
         logger.info("[EARNINGS-SOURCE] receiver at %s reports no invalidations yet - local cache unchanged", url)
         return True
+    remote_age_days = (time.time() - remote_ts) / 86400.0
+    if remote_age_days > 7:
+        # A receiver that has seen no Finnhub push in over a week is
+        # indistinguishable from a dead one, and the "already current" INFO
+        # line below reads as healthy. Observed live: last_invalidation
+        # froze at 2026-08-28 for 6+ weeks of runs with no signal.
+        logger.warning("[EARNINGS-SOURCE] receiver at %s last invalidation is %.1f days old "
+                       "(%s) - receiver may be dead; local cache unchanged (fail-open, run continues)",
+                       url, remote_age_days,
+                       time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(remote_ts)))
     local_ts = _json_timestamp(cache_file, "_timestamp")
     applied_ts = _json_timestamp(state_file, "last_applied_invalidation")
     if remote_ts <= max(local_ts, applied_ts):

@@ -224,12 +224,14 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
     else:
         try:
             LOG_DIR.mkdir(exist_ok=True)
-            CACHE_FILE.write_text(json.dumps({
+            _tmp = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+            _tmp.write_text(json.dumps({
                 "_timestamp": time.time(),
                 "_from": today.isoformat(),
                 "_to": future.isoformat(),
                 "dividends": [{"symbol": k, "exDate": v.isoformat()} for k,v in dividend_map.items()]
             }, indent=2))
+            os.replace(_tmp, CACHE_FILE)
         except Exception as e:
             logger.debug("[SWALLOWED] writing dividend cache %s: %r", CACHE_FILE, e)
             pass
