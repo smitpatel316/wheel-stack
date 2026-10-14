@@ -235,8 +235,7 @@ def build_cache(symbols: List[str]) -> Dict[str, Dict]:
                 fb["symbol"] = sym.upper()
                 overview_map[sym.upper()] = fb
                 fallback_used += 1
-                print(f"[FUND] {sym.upper()} via finnhub-fallback")
-                logger.info("[FUND] %s fundamentals served by finnhub-fallback", sym.upper())
+                print(f"[FUND] {sym.upper()} via finnhub-fallback")  # logger.info duplicate removed 2026-10-14: summary at end of phase covers it
         time.sleep(0.6)
 
     if fallback_used:
