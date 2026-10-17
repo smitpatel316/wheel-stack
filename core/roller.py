@@ -1,6 +1,8 @@
 """
-Rolling engine v2.5 - assignment avoidance debit override + robust
-- v2.5: If DTE<=1 and OTM<1% or ITM, allow debit roll up to -$0.20 to avoid assignment (0% assignment target per paper 371% roll rate)
+Rolling engine - credit-only rolls (policy set 2026-10-16, Smit's direction)
+- Rolls require a net credit >= $0.10 in ALL cases. The v2.5 debit override
+  (up to -$0.20 debit at DTE<=1 to dodge assignment) is REMOVED: never pay
+  to avoid assignment - assignment is the second half of the wheel.
 - Tightened 3% OTM, close-before-open 2s, spread filter
 """
 from dataclasses import dataclass
@@ -142,10 +144,11 @@ def evaluate_roll_need(candidate: RollCandidate, config: Dict = None) -> RollDec
                 roll_type = "assignment_avoidance"
             urgency = "critical"
 
-    # v2.5: Critical override DTE<=1 and ITM or OTM<1% needs roll even if no credit, allow small debit
+    # Critical override: DTE<=1 and ITM or OTM<1% always gets evaluated for a
+    # roll - but credit-only since 2026-10-16; no credit target = assignment.
     if candidate.dte is not None and candidate.dte <= 1:
         if otm_pct < 0.01:  # ITM or <1% OTM and DTE 0-1
-            reasons.append(f"CRITICAL: DTE {candidate.dte} <=1 and OTM {otm_pct:.1%} <1% -> force roll to avoid assignment (allow debit -$0.20)")
+            reasons.append(f"CRITICAL: DTE {candidate.dte} <=1 and OTM {otm_pct:.1%} <1% -> force roll evaluation (credit-only; no credit target = rides to assignment)")
             should_roll = True
             roll_type = "assignment_avoidance"
             urgency = "critical"
@@ -225,9 +228,10 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
     spread_max_abs = cfg.get("spread_max_abs", 0.15)
     spread_max_pct = cfg.get("spread_max_pct", 0.12)
 
-    # v2.5: Allow debit for critical assignment avoidance
-    if decision.urgency == "critical" and decision.candidate.dte is not None and decision.candidate.dte <= 1:
-        min_credit = -0.20  # allow up to $0.20 debit to avoid assignment
+    # Credit-only (2026-10-16, Smit): NO debit override for critical/DTE<=1.
+    # The config min_credit floor holds in all cases; a position with no
+    # qualifying credit target rides to expiry/assignment - assignment is
+    # the second half of the wheel, never pay to avoid it.
 
     try:
         from config.params import DELTA_MIN, DELTA_MAX, MIN_PREMIUM, YIELD_MIN, YIELD_MAX

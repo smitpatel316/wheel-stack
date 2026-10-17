@@ -161,17 +161,24 @@ class TestRollTargets:
         targets = find_roll_targets(cand, [too_short, ok], d)
         assert all(t.dte >= 27 for t in targets)
 
-    def test_ro10_debit_boundary(self):
+    def test_ro10_no_debit_even_when_critical(self):
+        # Policy change 2026-10-16 (Smit): the v2.5 debit override is gone.
+        # Rolls are credit-only in ALL cases - a critical DTE<=1 position
+        # with only debit targets gets NO targets and rides to assignment
+        # (assignment is the second half of the wheel, never pay to avoid it).
         cand = _cand(dte=1, strike=50, und=50.2, current=1.30)
         d = evaluate_roll_need(cand)
         assert d.urgency == "critical"
-        ok_debit = self._target_contract(dte=20, bid=1.11)   # net -0.19 allowed
-        bad_debit = self._target_contract(dte=20, bid=1.09)  # net -0.21 rejected
-        bad_debit.symbol = "XYZ_P_target2"
-        targets = find_roll_targets(cand, [ok_debit, bad_debit], d)
-        nets = {t.symbol: t.net_credit for t in targets}
-        assert "XYZ_P_target" in nets and abs(nets["XYZ_P_target"] + 0.19) < 1e-6
-        assert "XYZ_P_target2" not in nets
+        small_debit = self._target_contract(dte=20, bid=1.11)   # net -0.19
+        big_debit = self._target_contract(dte=20, bid=1.09)     # net -0.21
+        big_debit.symbol = "XYZ_P_target2"
+        assert find_roll_targets(cand, [small_debit, big_debit], d) == []
+        # ...while a genuine credit target for the same critical position
+        # is still found (the override removal must not block credit rolls).
+        credit = self._target_contract(dte=20, bid=1.45)        # net +0.15
+        credit.symbol = "XYZ_P_target3"
+        targets = find_roll_targets(cand, [credit], d)
+        assert len(targets) == 1 and abs(targets[0].net_credit - 0.15) < 1e-6
 
     def test_ro10b_non_critical_never_takes_debit(self):
         cand = _cand(dte=20, strike=50, und=49, current=1.30)
@@ -183,8 +190,8 @@ class TestRollTargets:
         c = FakeBrokerClient()
         cand = _cand(dte=1, strike=50, und=50.2, current=1.30)
         d = evaluate_roll_need(cand)
-        target = find_roll_targets(cand, [self._target_contract(dte=20, bid=1.15)], d)
-        assert target, "critical roll should find the debit target"
+        target = find_roll_targets(cand, [self._target_contract(dte=20, bid=1.45)], d)
+        assert target, "critical roll should find the credit target"
         import core.roller as ro
         orig_sleep = ro.time.sleep
         ro.time.sleep = lambda *_: None

@@ -14,6 +14,10 @@ log = logging.getLogger(__name__)
 # assignment/expiry. Community consensus: a position rolled 1-2 times without
 # improvement should stop rolling (rolls out of hope compound losses).
 MAX_ROLLS_PER_LINEAGE = 2
+# Per-run roll budget (2026-10-16): counts EXECUTED rolls only, never
+# attempts - a candidate with zero qualifying targets costs nothing, so
+# hopeless lineages cannot starve rollable positions behind them.
+MAX_ROLLS_PER_RUN = 2
 ROLL_COUNTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "roll_counts.json")
 
 

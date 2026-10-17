@@ -1,7 +1,7 @@
 from pathlib import Path
 from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
-from core.state_manager import update_state, calculate_risk, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE
+from core.state_manager import update_state, calculate_risk, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE, MAX_ROLLS_PER_RUN
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
 from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
 from app_logging.strategy_logger import StrategyLogger
@@ -715,9 +715,18 @@ def main():
                         logger.info(f"[ROLLER] {d.candidate.symbol} already rolled {n}x (max {MAX_ROLLS_PER_LINEAGE}) - letting it ride to expiry/assignment (v2.6 cap)")
                     else:
                         capped.append(d)
-                if is_market_open and len(capped) > 2:
-                    logger.info(f"[ROLLER] Per-run roll cap (2/run): deferring {len(capped) - 2} to next run: " + ", ".join(d.candidate.symbol for d in capped[2:]))
-                for decision in (capped[:2] if is_market_open else []):
+                # Per-run cap counts EXECUTED rolls only (2026-10-16, Smit's
+                # go): the old code sliced the candidate list to its first 2
+                # BEFORE target evaluation,
+                # so two zero-target lineages (BAC/T burned 60 of 64 slots
+                # Sep 28-Oct 12) starved every position queued behind them.
+                # Now every candidate is evaluated in order - evaluation is
+                # free; only a successful roll consumes budget.
+                rolls_executed = 0
+                for idx, decision in enumerate(capped if is_market_open else []):
+                    if rolls_executed >= MAX_ROLLS_PER_RUN:
+                        logger.info(f"[ROLLER] Per-run roll cap ({MAX_ROLLS_PER_RUN} executed/run) reached: deferring {len(capped) - idx} to next run: " + ", ".join(d.candidate.symbol for d in capped[idx:]))
+                        break
                     try:
                         underlying = decision.candidate.underlying
                         opt_type = 'put' if decision.candidate.is_put else 'call'
@@ -744,7 +753,7 @@ def main():
                         # is never evaluated (NEE 2026-08-26). find_roll_targets
                         # applies its own roll-specific filters on the raw chain.
                         targets = find_roll_targets(decision.candidate, avail, decision, config={
-                            "min_credit": -0.20 if decision.urgency=="critical" and decision.candidate.dte<=1 else 0.10,
+                            "min_credit": 0.10,  # credit-only in ALL cases (2026-10-16, Smit): no debit rolls to dodge assignment - assignment is the wheel's second half
                             "dte_extension_min": 7,
                             "dte_extension_max": 21,
                             "exp_min": 14,
@@ -753,9 +762,10 @@ def main():
                         })
                         if targets:
                             best = targets[0]
-                            logger.info(f"[ROLLER] Rolling {decision.candidate.symbol} -> {best.symbol} net ${best.net_credit:.2f} {best.reasoning} {'(DEBIT AVOID ASSIGNMENT)' if best.net_credit<0 else ''}")
+                            logger.info(f"[ROLLER] Rolling {decision.candidate.symbol} -> {best.symbol} net ${best.net_credit:.2f} {best.reasoning}")
                             success = roll_position(client, decision.candidate, best, logger_obj=logger)
                             if success:
+                                rolls_executed += 1
                                 roll_counts[lineage] = roll_counts.get(lineage, 0) + 1
                                 save_roll_counts(roll_counts)
                             if success and strat_logger.enabled:
@@ -766,7 +776,7 @@ def main():
                                     market_context=market_ctx
                                 )
                         else:
-                            logger.info(f"[ROLLER] No roll targets for {decision.candidate.symbol} {'but critical DTE<=1 will attempt debit roll next cycle' if decision.urgency=='critical' else ''}")
+                            logger.info(f"[ROLLER] No roll targets for {decision.candidate.symbol} {'- critical, no credit target: rides to expiry/assignment' if decision.urgency=='critical' else ''}")
                     except Exception as e:
                         logger.warning(f"[ROLLER] Roll failed for {decision.candidate.symbol}: {e}")
             else:
