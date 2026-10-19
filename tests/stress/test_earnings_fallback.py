@@ -119,3 +119,52 @@ def test_alpha_calendar_parser_ignores_past_and_duplicates(monkeypatch):
     monkeypatch.setattr(ec, "get_alpha_key", lambda: "k")
     out = ec.fetch_earnings_calendar_alpha(["AAA", "BBB"])
     assert out == {"AAA": datetime.fromisoformat(d2).date()}
+
+
+# --- Response-cap splitting (2026-10-19) ------------------------------------
+# Finnhub caps the calendar response at ~1500 events; a capped window
+# silently covers only part of its range. fetch_earnings_finnhub must split
+# capped windows and merge, stay a single call below the cap, and keep the
+# None-on-failure contract when any split leg fails.
+
+def _span_days(params):
+    f = datetime.fromisoformat(params["from"]).date()
+    t = datetime.fromisoformat(params["to"]).date()
+    return (t - f).days
+
+
+def test_finnhub_cap_hit_splits_and_merges(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if _span_days(params) > 7:
+            return _Resp(payload={"earningsCalendar": [{"symbol": "FAR", "date": params["to"]}] * ec.CAP_HINT})
+        return _Resp(payload={"earningsCalendar": [{"symbol": "NEAR", "date": params["from"]}]})
+
+    monkeypatch.setattr("requests.get", fake_get)
+    out = ec.fetch_earnings_finnhub(date.today(), date.today() + timedelta(days=30))
+    assert out is not None
+    assert {e["symbol"] for e in out} == {"NEAR"}
+    assert len(out) < ec.CAP_HINT  # merged leaves only, cap-sized pages gone
+
+
+def test_finnhub_cap_split_failure_returns_none(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if _span_days(params) > 7:
+            return _Resp(payload={"earningsCalendar": [{"symbol": "FAR", "date": params["to"]}] * ec.CAP_HINT})
+        return _Resp(status=503)
+
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert ec.fetch_earnings_finnhub(date.today(), date.today() + timedelta(days=30)) is None
+
+
+def test_finnhub_below_cap_stays_single_call(monkeypatch):
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(1)
+        return _Resp(payload={"earningsCalendar": [{"symbol": "AAA", "date": params["to"]}] * (ec.CAP_HINT - 1)})
+
+    monkeypatch.setattr("requests.get", fake_get)
+    out = ec.fetch_earnings_finnhub(date.today(), date.today() + timedelta(days=30))
+    assert len(out) == ec.CAP_HINT - 1
+    assert len(calls) == 1

@@ -295,15 +295,13 @@ def main():
     try:
         if EARNINGS_ENABLED:
             logger.info(f"[EARNINGS] Fetching earnings calendar {len(SYMBOLS)} symbols next {EARNINGS_CACHE_DAYS}d (Finnhub primary + 503 retain + Alpha fallback)")
-            # Pi migration: the Finnhub webhook receiver now lives off-host, so
-            # its cache-invalidation signals no longer land here. Pull its state
-            # (<=5s, fail-open): clears the local cache only if the receiver saw
-            # a newer Finnhub event; any failure keeps today's cache behavior.
-            try:
-                from core.earnings_source import sync_from_source as _earn_src_sync
-                _earn_src_sync()
-            except Exception as e:
-                logger.warning("[SWALLOWED] earnings-source pull failed (continuing with local cache): %r", e)
+            # Earnings data comes from build_cache's direct Finnhub pull
+            # every run (Alpha EARNINGS_CALENDAR fallback, then cache
+            # <=48h, then the last-good snapshot). The Pi webhook receiver's
+            # invalidation sync was retired 2026-10-19 (Smit approved): its
+            # Finnhub pushes stopped 2026-08-28 and the direct pull
+            # supersedes it. core/earnings_source.py stays in the tree,
+            # unused by the engine.
             earnings_report = get_earnings_risk_report(SYMBOLS, block_days=EARNINGS_BLOCK_DAYS, days_ahead=EARNINGS_CACHE_DAYS, dte_default=EARNINGS_BLOCK_DTE)
             from datetime import datetime
             for sym, info in earnings_report.items():

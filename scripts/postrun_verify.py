@@ -95,6 +95,47 @@ def extract_actions(lines):
     return out
 
 
+def assess_earnings_data(text):
+    """Judge THIS run's earnings data from the log's own evidence.
+
+    2026-10-19 rewire: the engine's earnings come from build_cache's direct
+    Finnhub pull every run (Alpha fallback, then cache <=48h, then the
+    last-good snapshot). The old check read the Pi webhook receiver's
+    invalidation state via [EARNINGS-SOURCE] lines; that receiver stopped
+    receiving Finnhub pushes on 2026-08-28, so every run verified DEGRADED
+    even though the direct pull was healthy. The receiver is retired from
+    the data path — what matters now is whether the direct pull worked.
+
+    Returns (ok, detail). Not-ok means the primary pull failed and the run
+    screened on fallback data, or had no earnings data at all. A last-good
+    PRELOAD line alone does not fail the run: build_cache loads it as a
+    fallback before fetching, and after a >48h gap (e.g. a weekend) it
+    prints even when the fetch then succeeds with fresh data.
+    """
+    if "NO earnings data from Finnhub, cache, or Alpha" in text:
+        return False, "no earnings data from Finnhub, cache, or Alpha - earnings blocking degraded"
+    fetch_failed = ("Finnhub fetch failed after 3 attempts" in text
+                    or "Finnhub rate-limited (429) on all 3 attempts" in text)
+    if fetch_failed:
+        if "last-good snapshot" in text.lower():
+            cover = "last-good snapshot"
+        elif "retaining stale cache" in text:
+            cover = "stale cache (<=48h)"
+        elif "retaining fresh cache" in text:
+            cover = "fresh cache"
+        elif "Alpha EARNINGS_CALENDAR fallback:" in text:
+            cover = "Alpha fallback"
+        else:
+            cover = "cache"
+        return False, f"Finnhub direct pull failed this run; screened on {cover}"
+    m = re.search(r"\[EARNINGS\] (Blocked \d+|No blocked, found \d+ dates)", text)
+    if m:
+        return True, f"direct Finnhub pull OK ({m.group(1)})"
+    if "[EARNINGS]" not in text:
+        return True, "no earnings lines (earnings disabled or older code path)"
+    return True, "direct Finnhub pull OK"
+
+
 def _optionable_base():
     """OPTIONABLE_URL from the environment, falling back to the repo .env.
 
@@ -185,14 +226,11 @@ def main():
     tb = "Traceback (most recent call last)" in text
     check("no-traceback", not tb, "clean" if not tb else "TRACEBACK present", fatal=True)
 
-    # 3. Earnings source (Pi) — current/applied/warned are all valid run states
-    m = re.search(r"\[EARNINGS-SOURCE\] (.*)", text)
-    if not m:
-        check("earnings-source", True, "no line (unset or older code path)")
-    elif "WARNING" in m.group(0) or "fail-open" in m.group(1) or "returned HTTP" in m.group(1) or "failed" in m.group(1).lower():
-        check("earnings-source", False, f"fail-open used: {m.group(1)[:140]}")
-    else:
-        check("earnings-source", True, m.group(1)[:120])
+    # 3. Earnings data — direct Finnhub pull (Pi receiver retired from the
+    # data path 2026-10-19; see assess_earnings_data). Fails only when the
+    # pull failed and the run screened on fallback data, or had no data.
+    _e_ok, _e_detail = assess_earnings_data(text)
+    check("earnings-data", _e_ok, _e_detail)
 
     # 4. Optionable (Pi) position sync: direct ok vs held in outbox
     if re.search(r"Synced positions to Optionable tracker", text):
@@ -268,7 +306,7 @@ def main():
     _PHASE_FAIL = re.compile(
         r"\[EARNINGS\] Failed:|\[DIVIDEND\] Failed:|\[FUND\] Failed:|\[VOL\] Failed:"
         r"|\[LIQ\] Failed:|Context analyzer failed|Closer eval failed"
-        r"|Roll evaluation failed|earnings-source pull failed"
+        r"|Roll evaluation failed"
         r"|Optionable sync failed:|Strategy logger save failed")
     _pf = _PHASE_FAIL.search(text)
     check("phase-failures", _pf is None,

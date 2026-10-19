@@ -67,10 +67,11 @@ def get_alpha_key():
         logger.debug("[SWALLOWED] loading ALPHA_VANTAGE_API_KEY from config.credentials, falling back to env: %r", e)
         return os.getenv("ALPHA_VANTAGE_API_KEY") or ""
 
-def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict]]:
-    """Returns the calendar list, or None on failure (distinct from a
-    genuinely empty calendar, which returns []). Callers rely on this to
-    decide whether to fall back / retain stale data."""
+def _fetch_window(from_date: date, to_date: date) -> Optional[List[Dict]]:
+    """One Finnhub calendar request for [from_date, to_date].
+
+    Returns the calendar list, or None on failure (distinct from a
+    genuinely empty calendar, which returns [])."""
     key = get_api_key()
     if not key:
         print("[EARNINGS] No Finnhub API key - earnings feed unavailable")
@@ -98,6 +99,35 @@ def fetch_earnings_finnhub(from_date: date, to_date: date) -> Optional[List[Dict
             time.sleep(1 + attempt)
     print("[EARNINGS] Finnhub rate-limited (429) on all 3 attempts")
     return None
+
+
+# Finnhub caps the earnings-calendar response (~1500 events, observed live
+# 2026-10-19: 14d and 30d pulls both returned exactly 1500 events covering
+# only part of the window — the 30d pull spanned just Nov 10-18 and missed
+# every near-term watchlist date; the cache merge in build_cache had been
+# silently papering over the blind spot). When a window comes back at the
+# cap, split it in half and merge the halves so no slice is dropped.
+CAP_HINT = 1500
+MAX_SPLIT_DEPTH = 4  # 30d -> ~2d leaves; a leaf still at cap is accepted as-is
+
+
+def fetch_earnings_finnhub(from_date: date, to_date: date, _depth: int = 0) -> Optional[List[Dict]]:
+    """Returns the calendar list for the whole range, or None on failure
+    (distinct from a genuinely empty calendar, which returns []). Callers
+    rely on this to decide whether to fall back / retain stale data."""
+    res = _fetch_window(from_date, to_date)
+    if res is None or len(res) < CAP_HINT or from_date >= to_date or _depth >= MAX_SPLIT_DEPTH:
+        return res
+    mid = from_date + timedelta(days=(to_date - from_date).days // 2)
+    left = fetch_earnings_finnhub(from_date, mid, _depth + 1)
+    if left is None:
+        return None
+    right = fetch_earnings_finnhub(mid + timedelta(days=1), to_date, _depth + 1)
+    if right is None:
+        return None
+    print(f"[EARNINGS] Finnhub window {from_date}..{to_date} hit the response cap; "
+          f"split-merged {len(left) + len(right)} events")
+    return left + right
 
 
 def fetch_earnings_calendar_alpha(symbols: List[str]) -> Dict[str, date]:
