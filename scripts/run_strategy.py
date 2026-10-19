@@ -660,9 +660,9 @@ def main():
         states = update_state(positions)
         current_risk = calculate_risk(positions)
 
-        # --- Phase 3 Roller v2.5 assignment avoidance debit override ---
+        # --- Phase 3 Roller: credit-only rolling (v2.5 debit override removed 2026-10-16) ---
         try:
-            logger.info(f"[ROLLER] Evaluating rolling need 3% OTM + assignment avoidance debit -$0.20 override, risk ${current_risk:.0f}")
+            logger.info(f"[ROLLER] Evaluating rolling need 3% OTM, credit-only (min +$0.10), risk ${current_risk:.0f}")
             roll_decisions = evaluate_all_positions(client, config={
                 "rolling_otm": adapted.get("ROLLING_OTM", 0.03),
                 "dte_critical": 3,
