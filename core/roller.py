@@ -270,7 +270,16 @@ def find_roll_targets(candidate: RollCandidate, available_contracts, decision: R
                 _drop("dte_ext_too_far")
                 continue
         if candidate.is_put:
-            if decision.roll_type == "defensive" and decision.urgency != "critical":
+            if decision.roll_type == "defensive":
+                # Strike ceiling for defensive put rolls at EVERY urgency
+                # (B7, fixed 2026-10-22, Smit approved). The old
+                # "urgency != critical" condition left defensive+critical
+                # rolls with NO strike cap: evaluate_roll_need's loss branch
+                # re-labels the DTE<=1 decision back to "defensive" after
+                # the critical override, so it fell through both guards.
+                # Live incident 2026-10-22: BAC $59P (DTE 1, 13.6% ITM)
+                # rolled UP to an $80P because the intrinsic gap counted
+                # as a $20.82 "credit". Never roll a put up in strike.
                 if c.strike > candidate.strike + 0.01:
                     _drop("strike_not_lower")
                     continue

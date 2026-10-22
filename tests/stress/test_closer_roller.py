@@ -186,6 +186,33 @@ class TestRollTargets:
         debit = self._target_contract(dte=30, bid=1.20)  # net -0.10
         assert find_roll_targets(cand, [debit], d) == []
 
+    def test_ro13_critical_defensive_rejects_higher_strike(self):
+        # B7 regression — live incident 2026-10-22: BAC $59P at DTE 1,
+        # 13.6% ITM, loss 380% rolled UP to an $80P because the defensive
+        # strike ceiling was skipped at critical urgency (evaluate's loss
+        # branch re-labels the DTE<=1 decision back to "defensive", which
+        # fell through both strike guards in find_roll_targets). The
+        # intrinsic gap counted as a $20.82 "credit". A put must never
+        # roll up in strike, at any urgency. If the evaluate() labeling
+        # is ever deliberately changed, this test is the tripwire to
+        # re-check the guard pairing in find_roll_targets.
+        cand = _cand(dte=1, strike=59.0, und=51.0, entry=1.75, current=8.40, delta=None)
+        d = evaluate_roll_need(cand)
+        assert d.urgency == "critical" and d.roll_type == "defensive"
+        higher = self._target_contract(strike=80.0, dte=57, bid=29.22, delta=-0.95)
+        assert find_roll_targets(cand, [higher], d) == []
+
+    def test_ro13b_critical_defensive_same_or_lower_strike_still_found(self):
+        # The B7 cap must not block legitimate critical rolls: same strike
+        # or lower for a genuine credit stays available at DTE 1.
+        cand = _cand(dte=1, strike=59.0, und=51.0, entry=1.75, current=8.40, delta=None)
+        d = evaluate_roll_need(cand)
+        same = self._target_contract(strike=59.0, dte=57, bid=9.00, delta=-0.85)
+        lower = self._target_contract(strike=55.0, dte=57, bid=8.75, delta=-0.80)
+        lower.symbol = "XYZ_P_target_lower"
+        targets = find_roll_targets(cand, [same, lower], d)
+        assert {t.strike for t in targets} == {59.0, 55.0}
+
     def test_ro11_close_before_open_ordering(self):
         c = FakeBrokerClient()
         cand = _cand(dte=1, strike=50, und=50.2, current=1.30)
