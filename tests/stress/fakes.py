@@ -124,7 +124,8 @@ class FakeBrokerClient:
         return {s: SimpleNamespace(price=p) for s, p in self.stock_trades.items()
                 if s in symbols}
 
-    def get_options_contracts(self, underlying_symbols, contract_type=None):
+    def get_options_contracts(self, underlying_symbols, contract_type=None,
+                              max_expiration_days=None):
         out = []
         for u in underlying_symbols:
             for raw, _snap in self.option_chain.get(u, []):

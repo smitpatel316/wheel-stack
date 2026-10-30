@@ -89,12 +89,17 @@ class BrokerClient:
         req = StockLatestTradeRequest(symbol_or_symbols=symbol)
         return self.stock_client.get_stock_latest_trade(req)
 
-    def get_options_contracts(self, underlying_symbols, contract_type=None):
+    def get_options_contracts(self, underlying_symbols, contract_type=None,
+                              max_expiration_days=None):
         timezone = ZoneInfo("America/New_York")
         today = datetime.datetime.now(timezone).date()
-        # Set the expiration date range for the options
+        # Set the expiration date range for the options. Callers pass
+        # max_expiration_days only for the roll search (ROLL_EXPIRATION_MAX);
+        # every other caller keeps the default CSP-screen window.
+        if max_expiration_days is None:
+            max_expiration_days = EXPIRATION_MAX
         min_expiration = today + timedelta(days=EXPIRATION_MIN)
-        max_expiration = today + timedelta(days=EXPIRATION_MAX)
+        max_expiration = today + timedelta(days=max_expiration_days)
 
         contract_type = {'put': ContractType.PUT, 'call': ContractType.CALL}.get(contract_type, None)
 

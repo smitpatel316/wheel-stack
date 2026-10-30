@@ -3,7 +3,7 @@ from core.broker_client import BrokerClient
 from core.execution import sell_puts, sell_calls, place_sgov_limit_order
 from core.state_manager import update_state, calculate_risk, TREASURY_SYMBOLS, load_roll_counts, save_roll_counts, prune_roll_counts, MAX_ROLLS_PER_LINEAGE, MAX_ROLLS_PER_RUN
 from config.credentials import ALPACA_API_KEY, ALPACA_SECRET_KEY, IS_PAPER
-from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source
+from config.params import MAX_RISK, EARNINGS_BLOCK_DAYS, EARNINGS_BLOCK_DTE, EARNINGS_CACHE_DAYS, EARNINGS_ENABLED, DIVIDEND_ENABLED, DIVIDEND_BLOCK_DAYS, FUNDAMENTALS_ENABLED, IV_RANK_ENABLED, LIMIT_ORDER_ENABLED, LIMIT_WAIT_SECONDS, SGOV_ENABLED, SGOV_CASH_BUFFER, load_watchlist, watchlist_source, ROLL_EXPIRATION_MAX
 from app_logging.strategy_logger import StrategyLogger
 from app_logging.logger_setup import setup_logger
 from core.optionable_sync import sync_alpaca_equity_to_optionable, sync_sgov_to_optionable, alive as optionable_alive, alive_retry as optionable_alive_retry, sync_closed_trades, reconcile_open_entry_prices
@@ -729,7 +729,14 @@ def main():
                         underlying = decision.candidate.underlying
                         opt_type = 'put' if decision.candidate.is_put else 'call'
                         lineage = f"{underlying}:{'P' if decision.candidate.is_put else 'C'}"
-                        contracts_raw = client.get_options_contracts([underlying], opt_type)
+                        # Roll-only fetch window (2026-10-30, Smit approved):
+                        # the roll search looks out to ROLL_EXPIRATION_MAX so
+                        # the next monthly is visible when every in-window
+                        # contract fails the 7d DTE-extension test (CSCO
+                        # 2026-10-30). The CSP scan keeps EXPIRATION_MAX=60.
+                        contracts_raw = client.get_options_contracts(
+                            [underlying], opt_type,
+                            max_expiration_days=ROLL_EXPIRATION_MAX)
                         snaps = {}
                         occs = [c.symbol for c in contracts_raw]
                         for i in range(0, len(occs), 100):

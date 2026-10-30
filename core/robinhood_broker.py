@@ -474,9 +474,12 @@ class RobinhoodBrokerClient:
             f"RH option position not parseable, refusing to drop it: {json_keys(p)}")
 
     # ---------------------------------------------------------- data (delegated)
-    def get_options_contracts(self, underlying_symbols, contract_type=None):
+    def get_options_contracts(self, underlying_symbols, contract_type=None,
+                              max_expiration_days=None):
         self._require_data("get_options_contracts")
-        return self._data.get_options_contracts(underlying_symbols, contract_type)
+        return self._data.get_options_contracts(
+            underlying_symbols, contract_type,
+            max_expiration_days=max_expiration_days)
 
     def get_option_snapshot(self, symbol):
         self._require_data("get_option_snapshot")

@@ -39,6 +39,13 @@ YIELD_MIN = 0.008
 YIELD_MAX = 0.50
 EXPIRATION_MIN = 14
 EXPIRATION_MAX = 60
+# Roll-only fetch window (2026-10-30, Smit approved): the roll search may
+# look past the 60d CSP-screen window so the next monthly is visible when
+# every in-window contract fails the 7d DTE-extension test (CSCO Dec 18
+# $105P, 2026-10-30: all 307 fetched contracts dropped dte_ext<7d while the
+# qualifying January expiry sat outside the 60d cap). The CSP scan keeps
+# EXPIRATION_MAX=60 -- the global 60->95 widening stays retracted.
+ROLL_EXPIRATION_MAX = 95
 OPEN_INTEREST_MIN = 100
 SCORE_MIN = 0.02
 MIN_PREMIUM = 0.20
@@ -228,6 +235,7 @@ YIELD_MIN = _env_float("YIELD_MIN", YIELD_MIN)
 YIELD_MAX = _env_float("YIELD_MAX", YIELD_MAX)
 EXPIRATION_MIN = _env_int("EXPIRATION_MIN", EXPIRATION_MIN)
 EXPIRATION_MAX = _env_int("EXPIRATION_MAX", EXPIRATION_MAX)
+ROLL_EXPIRATION_MAX = _env_int("ROLL_EXPIRATION_MAX", ROLL_EXPIRATION_MAX)
 OPEN_INTEREST_MIN = _env_int("OPEN_INTEREST_MIN", OPEN_INTEREST_MIN)
 
 # Feature switches
