@@ -581,6 +581,10 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
     - If Optionable Open trade ticker+strike+exp not in Alpaca positions, and exp date <= today => Expired closePrice 0 (worthless)
     - Else if closed early, fetch real buy price; profit = entry - close.
     - If stock position appeared for same ticker and CSP, mark Assigned.
+    - If a CC disappears and its stock is gone with no buy fill, mark
+      Exercised (called away), closePrice 0: the premium is kept, but the
+      status must not be the estimated Close below, nor Expired (the
+      shares did not survive).
     """
     if not _require_alpaca_client(client):
         return
@@ -720,7 +724,24 @@ def sync_closed_trades(client, close_price: Optional[Union[float, Dict[str,float
                             logger.debug("[SWALLOWED] expiry-date comparison for %s exp %s: %r", ticker, exp, e)
                             is_expired = False
 
-                        if ticker in alpaca_stock_tickers and ttype == 'CSP':
+                        if ttype == 'CC' and ticker not in alpaca_stock_tickers:
+                            # Called away (2026-11-02, CC-assignment recording
+                            # fix): the short call is gone AND the shares are
+                            # gone, with no buy-to-close fill. In every
+                            # engine-consistent story that is assignment,
+                            # early or at expiry: the premium is kept, so
+                            # closePrice 0 like an expired call -- but the
+                            # status must say Exercised, never the estimated
+                            # Close below (which would book a phantom 50%
+                            # profit) and never Expired (the shares did not
+                            # survive). A bought-back call never reaches
+                            # here: its buy fill is found above. A worthless
+                            # expiry never reaches here either: the shares
+                            # are still held then.
+                            new_status = 'Exercised'
+                            close_price_val = 0.0
+                            logger.info(f"Optionable: {ticker} {ttype} ${strike} {exp} -> {new_status} (shares called away) entry ${entry_price:.2f} close ${close_price_val:.2f}")
+                        elif ticker in alpaca_stock_tickers and ttype == 'CSP':
                             # Assigned
                             new_status = 'Assigned'
                             # Assigned -> closePrice = strike? Actually Optionable Assigned uses entry - 0? 
