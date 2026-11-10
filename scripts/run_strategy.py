@@ -864,7 +864,7 @@ def main():
             # Fidelity SPAXX: even if opt_bp low after sweep, total liquid (cash+SGOV) still secures puts
             sell_puts(client, allowed_symbols, buying_power, strat_logger, market_context=market_ctx, earnings_map=earnings_map if EARNINGS_ENABLED else None, dividend_map=dividend_map, fundamentals_map=fundamentals_map, vol_map=vol_map, liquidity_map=liquidity_map, execution_config={"limit_enabled": LIMIT_ORDER_ENABLED, "wait_seconds": LIMIT_WAIT_SECONDS}, fund_with_sgov=SGOV_ENABLED and os.getenv("SGOV_FUND_CSP", "true").lower() in ("1", "true", "yes"), rh_feed=rh_feed)
         else:
-            logger.info(f"[WHEEL] Insufficient BP stock ${buying_power:.0f} options ${opt_bp:.0f} total_liq ${total_liq_check:.0f} < $2000 min, skipping new CSPs Option A wait - SGOV sweep holds ${total_liq_check:.0f} earning interest")
+            logger.info(f"[WHEEL] Insufficient BP stock ${buying_power:.0f} options ${opt_bp:.0f} total_liq ${total_liq_check:.0f} < $2000 min, skipping new CSPs Option A wait - total liq ${total_liq_check:.0f} held in cash/SGOV earning interest")
 
     if rh_feed is not None:
         try:
