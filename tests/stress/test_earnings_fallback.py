@@ -168,3 +168,22 @@ def test_finnhub_below_cap_stays_single_call(monkeypatch):
     out = ec.fetch_earnings_finnhub(date.today(), date.today() + timedelta(days=30))
     assert len(out) == ec.CAP_HINT - 1
     assert len(calls) == 1
+
+
+def test_nonempty_calendar_no_watchlist_dates_logs_quiet_window(monkeypatch, tmp_path, capsys):
+    """2026-11-16: a successful Finnhub pull with zero watchlist symbols
+    (post-earnings-season quiet window) returned {} with no log line at all,
+    indistinguishable in the run log from a feed failure. build_cache must
+    say so explicitly."""
+    _no_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(ec, "LAST_GOOD_FILE", tmp_path / "earnings-last-good.json")
+    future = (date.today() + timedelta(days=10)).isoformat()
+    monkeypatch.setattr("requests.get", lambda *a, **k: _Resp(payload={"earningsCalendar": [
+        {"symbol": "ZZZ", "date": future},
+        {"symbol": "YYY", "date": future},
+    ]}))
+    m = ec.build_cache(["AAA"])
+    assert m == {}
+    out = capsys.readouterr().out
+    assert "quiet window" in out
+    assert "2 events" in out

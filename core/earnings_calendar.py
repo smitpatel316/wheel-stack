@@ -279,6 +279,13 @@ def build_cache(symbols: List[str], days_ahead: int = 30) -> Dict[str, date]:
             for sym, d in old_cache.items():
                 if sym not in earnings_map:
                     earnings_map[sym] = d
+        if not earnings_map:
+            # 2026-11-16: a successful pull with zero watchlist dates (e.g.
+            # the post-earnings-season quiet window) used to return {} with
+            # no log line at all, indistinguishable in the run log from a
+            # feed failure. Say so explicitly so the next review can tell
+            # "quiet window" from "Finnhub/Alpha both down".
+            print(f"[EARNINGS] Finnhub returned {len(fetched)} events, 0 watchlist dates in {today}..{future} (quiet window, not a feed failure)")
 
     # Always write cache if we have data, otherwise keep old file
     if earnings_map:
